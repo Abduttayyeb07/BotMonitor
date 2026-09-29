@@ -45,6 +45,7 @@ def issue_text(incident: dict) -> str:
             return f"Docker reported the container health status as unhealthy. Health output: {detail[1].strip()}"
         return "Docker reported the container health status as unhealthy."
     messages = {
+        "PROJECT_DOWN": "All containers in this project are down.",
         "CONTAINER_DOWN": "Docker reported that the container is down.",
         "SYSTEMD_DOWN": "systemd reported that the service is not active.",
         "HIGH_MEMORY": "Host memory usage exceeded the configured threshold.",
@@ -70,6 +71,33 @@ def message_for(prefix: str, incident: dict) -> str:
             f"<b>Occurrences</b>  {incident['occurrences']}\n"
             f"<b>First Detected</b>  {local_time(incident['first_seen'])}\n"
             f"<b>{ending_label}</b>  {local_time(ending_value)}")
+
+
+def collapse_project_failures(findings: list[dict], config: dict) -> list[dict]:
+    """Collapse a complete Docker project outage into one incident."""
+    configured = config.get("docker", {}).get("containers") or []
+    by_project: dict[str, set[str]] = {}
+    for item in configured:
+        by_project.setdefault(item.get("project", item["name"]), set()).add(item["name"])
+    result = []
+    collapsed: set[tuple[str, str]] = set()
+    for project, names in by_project.items():
+        down = {finding["service"] for finding in findings
+                if finding["project"] == project and finding["type"] == "CONTAINER_DOWN"}
+        if len(names) > 1 and names.issubset(down):
+            collapsed.add((project, "CONTAINER_DOWN"))
+            result.append({
+                "project": project,
+                "service": f"{project}-project",
+                "type": "PROJECT_DOWN",
+                "severity": "CRITICAL",
+                "message": f"All {len(names)} containers in the project are down: {', '.join(sorted(names))}",
+            })
+    for finding in findings:
+        if (finding["project"], finding["type"]) in collapsed and finding["type"] == "CONTAINER_DOWN":
+            continue
+        result.append(finding)
+    return result
 
 
 def main() -> None:
@@ -104,6 +132,7 @@ def main() -> None:
         findings += docker_checks(config.get("docker", {}))
         findings += systemd_checks(config.get("systemd", {}), config.get("systemd_status_path", "/data/systemd-status.json"))
         findings += endpoint_checks(config.get("docker", {}).get("containers") or [])
+        findings = collapse_project_failures(findings, config)
         cooldowns = config.get("cooldowns", {})
         for finding in findings:
             key = fingerprint(finding["project"], finding["service"], finding["type"], finding["message"])

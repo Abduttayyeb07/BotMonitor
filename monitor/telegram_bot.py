@@ -3,10 +3,12 @@ from __future__ import annotations
 import html
 import json
 import logging
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import docker
 import requests
@@ -58,6 +60,42 @@ class TelegramBotPanel:
         self.stop_event = threading.Event()
         self.offset = 0
         self.api_url = f"https://api.telegram.org/bot{token}" if token else ""
+
+    def overview_text(self) -> str:
+        frontend = self.projects.get("frontend", {}).get("items", [])
+        docker_bots = self.projects.get("bots_docker", {}).get("items", [])
+        system_services = sum(len(item.get("services", [])) for item in self.projects.get("bots_systemd", {}).get("items", []))
+        container_names = [name for group in self.projects.values() for project in group.get("items", []) for name in project.get("containers", [])]
+        down = 0
+        unhealthy = 0
+        for name in container_names:
+            container = self.container(name)
+            if container is None or container.status != "running":
+                down += 1
+            elif container.attrs.get("State", {}).get("Health", {}).get("Status") == "unhealthy":
+                unhealthy += 1
+        try:
+            with sqlite3.connect("/data/incidents.db") as database:
+                active_incidents = database.execute("SELECT COUNT(*) FROM incidents WHERE status='OPEN'").fetchone()[0]
+        except (sqlite3.Error, OSError):
+            active_incidents = "unknown"
+        if down or unhealthy or active_incidents not in (0, "unknown"):
+            current_status = "⚠️ Attention required"
+        else:
+            current_status = "🟢 All systems operational"
+        updated = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%d %b %Y, %H:%M PKT")
+        return ("🤖 <b>Central Bot Monitor</b>\n\n"
+                "Your live control panel for all frontend applications, Docker bots, and system services.\n\n"
+                "<b>Monitoring overview</b>\n\n"
+                f"🖥 <b>Frontend projects:</b> {len(frontend)}\n"
+                f"🐳 <b>Docker bot projects:</b> {len(docker_bots)}\n"
+                f"⚙️ <b>System services:</b> {system_services}\n"
+                f"📦 <b>Docker containers:</b> {len(container_names)}\n\n"
+                "<b>Current status</b>\n\n"
+                f"{current_status}\n"
+                f"⚠️ <b>Active incidents:</b> {active_incidents}\n"
+                f"🔄 <b>Last update:</b> {updated}\n\n"
+                "Select a section below to view project health, uptime, logs, errors, and service controls.")
 
     def api(self, method: str, payload: dict[str, Any], timeout: int = 35) -> dict[str, Any] | None:
         try:
@@ -127,6 +165,83 @@ class TelegramBotPanel:
                 return json.load(handle).get("services", {}).get(unit, {})
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
+
+    def incident_history(self, project_name: str) -> tuple[int, int, int]:
+        try:
+            with sqlite3.connect("/data/incidents.db") as database:
+                total, active, recovered = database.execute(
+                    "SELECT COUNT(*), SUM(status='OPEN'), SUM(status='RECOVERED') FROM incidents WHERE project=?",
+                    (project_name,),
+                ).fetchone()
+                return total or 0, active or 0, recovered or 0
+        except (sqlite3.Error, OSError):
+            return 0, 0, 0
+
+    @staticmethod
+    def health_bar(total: int, running: int, unhealthy: int) -> str:
+        if not total:
+            return "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜"
+        blocks = []
+        for index in range(10):
+            threshold = (index + 1) * total / 10
+            if threshold <= running:
+                blocks.append("🟦")
+            else:
+                blocks.append("🟥")
+        return "".join(blocks)
+
+    def pretty_project_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
+        project = self.project_by_id(group_id, project_id)
+        if not project:
+            return "<b>Project not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        containers = project.get("containers") or []
+        rows = []
+        running = 0
+        unhealthy = 0
+        for name in containers:
+            container = self.container(name)
+            if container is None:
+                rows.append(f"🟥 <b>{esc(name)}</b>\n   <i>Stopped or unavailable</i>")
+                continue
+            icon, status = short_status(container)
+            state = container.attrs.get("State", {})
+            if status == "RUNNING":
+                running += 1
+            if status == "UNHEALTHY":
+                unhealthy += 1
+            rows.append(
+                f"{icon} <b>{esc(name)}</b>\n"
+                f"   <i>{esc(status.title())}  •  Uptime {uptime(state.get('StartedAt'))}  •  Restarts {container.attrs.get('RestartCount', 0)}</i>"
+            )
+        total, active, recovered = self.incident_history(project.get("name", project_id))
+        lines = [
+            f"📊 <b>{esc(project['name'])}</b>",
+            f"{self.health_bar(len(containers), running, unhealthy)}  <b>{running}/{len(containers)} running</b>",
+            "",
+            "\n\n".join(rows) if rows else "<i>No Docker containers configured.</i>",
+            "",
+            f"📚 <b>Incident history:</b> {total} total  •  {active} active  •  {recovered} recovered",
+        ]
+        services = project.get("services") or []
+        if services:
+            lines.append("\n<b>Systemd services</b>")
+            for service in services:
+                details = self.systemd_status(service["unit"])
+                status = details.get("active_state", "unknown")
+                icon = "🟢" if status == "active" else "🔴"
+                lines.append(f"{icon} <b>{esc(service['name'])}</b>  <i>{esc(status.upper())}</i>")
+        container_buttons = [
+            {"text": f"🔎 {name[:22]}", "callback_data": f"container:{group_id}:{project_id}:{index}"}
+            for index, name in enumerate(containers)
+        ]
+        buttons = [container_buttons[index:index + 2] for index in range(0, len(container_buttons), 2)]
+        service_buttons = [
+            {"text": f"⚙️ {service['name'][:22]}", "callback_data": f"service:{group_id}:{project_id}:{index}"}
+            for index, service in enumerate(services)
+        ]
+        buttons.extend([service_buttons[index:index + 2] for index in range(0, len(service_buttons), 2)])
+        buttons.append([{"text": "⬅️ Projects", "callback_data": f"group:{group_id}"}])
+        return "\n".join(lines), buttons
 
     def project_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
         project = self.project_by_id(group_id, project_id)
@@ -242,7 +357,7 @@ class TelegramBotPanel:
         if message:
             command = (message.get("text") or "").split()[0].lower()
             if command in {"/start", "/menu", "/status"}:
-                self.send(chat_id, "🤖 <b>Central Bot Monitor</b>\n\nChoose a group to view project health:", self.group_keyboard())
+                self.send(chat_id, self.overview_text(), self.group_keyboard())
             return
         if not callback:
             return
@@ -259,7 +374,7 @@ class TelegramBotPanel:
             text, keyboard = f"📁 <b>{esc(group.get('title', group_id))}</b>\n\nChoose a {label}:", self.project_keyboard(group_id)
         elif data.startswith("project:"):
             _, group_id, project_id = data.split(":", 2)
-            text, keyboard = self.project_page(group_id, project_id)
+            text, keyboard = self.pretty_project_page(group_id, project_id)
         elif data.startswith("container:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.container_page(group_id, project_id, int(index))
