@@ -72,9 +72,6 @@ docker:
     - name: beenco-connect-redis-1
       project: beenco-connect
       critical: true
-    - name: beenco-connect-kafka-1
-      project: beenco-connect
-      critical: true
     - name: beencomindshub--web-1
       project: beencomindshub
       critical: true
@@ -242,7 +239,6 @@ projects:
           - beenco-connect-portal-1
           - beenco-connect-postgres-1
           - beenco-connect-redis-1
-          - beenco-connect-kafka-1
       - id: beencomindshub
         name: Beencomindshub
         menu_name: Beencomindshub
@@ -336,8 +332,8 @@ projects:
         containers:
           - zigchain-bot
       - id: stakeunstake
-        name: Zigchain Monitor
-        menu_name: Zigchain Monitor
+        name: Stake Unstake
+        menu_name: Stake Unstake
         compose_project: stakeunstake
         working_dir: /root/saad/StakeUnstake
         compose_file: /root/saad/StakeUnstake/docker-compose.yml
@@ -360,8 +356,8 @@ projects:
         containers:
           - highbuy-monitor
       - id: nawavaldora
-        name: Zigchain Wallet Monitor
-        menu_name: Wallet Monitor
+        name: Nawa Valdora
+        menu_name: Nawa Valdora
         compose_project: nawavaldora
         working_dir: /root/saad/NawaValdora
         compose_file: /root/saad/NawaValdora/docker-compose.yml
