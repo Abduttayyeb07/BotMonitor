@@ -71,7 +71,9 @@ class IncidentStore:
                 stamp = now()
                 self.db.execute("UPDATE incidents SET status='RECOVERED', resolved_at=? WHERE fingerprint=?",
                                  (stamp, row["fingerprint"]))
-                recovered.append(dict(row))
+                recovered_row = dict(row)
+                recovered_row["resolved_at"] = stamp
+                recovered.append(recovered_row)
         if recovered:
             self.db.commit()
         return recovered

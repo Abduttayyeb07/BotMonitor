@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import html
 import os
 import signal
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from .checks import endpoint_checks, host_checks, systemd_checks
@@ -18,11 +21,51 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(
 log = logging.getLogger(__name__)
 
 
+PKT = ZoneInfo("Asia/Karachi")
+
+
+def local_time(value: str | None) -> str:
+    if not value:
+        return "Unknown"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone(PKT).strftime("%d %b %Y, %H:%M:%S PKT")
+    except ValueError:
+        return value
+
+
+def incident_title(incident_type: str) -> str:
+    return incident_type.replace("_", " ").title()
+
+
+def issue_text(incident: dict) -> str:
+    messages = {
+        "CONTAINER_UNHEALTHY": f"Docker reported the container health status as unhealthy.",
+        "CONTAINER_DOWN": "Docker reported that the container is down.",
+        "SYSTEMD_DOWN": "systemd reported that the service is not active.",
+        "HIGH_MEMORY": "Host memory usage exceeded the configured threshold.",
+        "DISK_FULL": "Host disk usage exceeded the configured threshold.",
+        "HIGH_CPU": "Host CPU usage exceeded the configured threshold.",
+    }
+    return messages.get(incident["incident_type"], incident["message"])
+
+
 def message_for(prefix: str, incident: dict) -> str:
-    return (f"{prefix}\n\nSeverity: {incident['severity']}\nProject: {incident['project']}\n"
-            f"Service: {incident['service']}\nType: {incident['incident_type']}\n"
-            f"Message: {incident['message']}\nOccurrences: {incident['occurrences']}\n"
-            f"First seen: {incident['first_seen']}\nLast seen: {incident['last_seen']}")
+    recovered = prefix.startswith("✅") or incident.get("status") == "RECOVERED"
+    heading = "✅ <b>INCIDENT RECOVERED</b>" if recovered else "🚨 <b>INCIDENT OPEN</b>"
+    status = "✅ Recovered" if recovered else "🔴 Active"
+    ending_label = "Recovered At" if recovered else "Last Detected"
+    ending_value = incident.get("resolved_at") if recovered else incident.get("last_seen")
+    return (f"{heading}\n\n"
+            f"<b>Project:</b> <code>{html.escape(str(incident['project']))}</code>\n"
+            f"<b>Service:</b> <code>{html.escape(str(incident['service']))}</code>\n"
+            f"<b>Incident:</b> {html.escape(incident_title(incident['incident_type']))}\n"
+            f"<b>Severity:</b> {html.escape(str(incident['severity']))}\n"
+            f"<b>Issue:</b> {html.escape(issue_text(incident))}\n"
+            f"<b>Status:</b> {status}\n"
+            f"<b>Occurrences:</b> {incident['occurrences']}\n"
+            f"<b>First Detected:</b> {local_time(incident['first_seen'])}\n"
+            f"<b>{ending_label}:</b> {local_time(ending_value)}")
 
 
 def main() -> None:

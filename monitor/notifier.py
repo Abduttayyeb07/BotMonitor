@@ -22,7 +22,7 @@ class TelegramNotifier:
             try:
                 response = requests.post(
                     f"https://api.telegram.org/bot{self.token}/sendMessage",
-                    json={"chat_id": chat_id, "text": text}, timeout=10)
+                    json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=10)
                 response.raise_for_status()
             except requests.RequestException:
                 delivered = False
