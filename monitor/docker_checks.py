@@ -23,8 +23,9 @@ def log_checks(config: dict[str, Any], cursors: dict[str, int]) -> list[dict[str
     if not config.get("enabled", True) or not config.get("log_monitoring", {}).get("enabled", True):
         return []
     findings = []
-    patterns = [re.compile(pattern, re.IGNORECASE) for pattern in config.get("log_monitoring", {}).get("error_patterns", DEFAULT_ERROR_PATTERNS)]
-    ignores = [re.compile(pattern, re.IGNORECASE) for pattern in config.get("log_monitoring", {}).get("ignore_patterns", [])]
+    log_config = config.get("log_monitoring", {})
+    patterns = [re.compile(pattern, re.IGNORECASE) for pattern in log_config.get("error_patterns", DEFAULT_ERROR_PATTERNS)]
+    global_ignores = [re.compile(pattern, re.IGNORECASE) for pattern in log_config.get("ignore_patterns", [])]
     try:
         client = docker.from_env()
         configured = {item["name"]: item for item in (config.get("containers") or [])}
@@ -32,6 +33,8 @@ def log_checks(config: dict[str, Any], cursors: dict[str, int]) -> list[dict[str
             item = configured.get(container.name)
             if item is None:
                 continue
+            item_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in item.get("log_error_patterns", [])] or patterns
+            ignores = global_ignores + [re.compile(pattern, re.IGNORECASE) for pattern in item.get("ignore_log_patterns", [])]
             cursor = cursors.setdefault(container.name, int(time.time()))
             raw = container.logs(since=cursor, timestamps=True, tail=200).decode("utf-8", errors="replace")
             cursors[container.name] = int(time.time())
@@ -39,7 +42,7 @@ def log_checks(config: dict[str, Any], cursors: dict[str, int]) -> list[dict[str
                 clean = re.sub(r"^\S+\s+", "", line).strip()
                 if not clean or any(pattern.search(clean) for pattern in ignores):
                     continue
-                if not any(pattern.search(clean) for pattern in patterns):
+                if not any(pattern.search(clean) for pattern in item_patterns):
                     continue
                 findings.append({
                     "project": item.get("project", container.name),

@@ -160,9 +160,21 @@ docker:
     - name: bep20-usdt-telegram-monitor
       project: bep20-usdt
       critical: true
+      ignore_log_patterns:
+        - "WebSocket decoded 0 events while HTTP backfill advanced"
+        - "WebSocket appears stalled"
+        - "WebSocket reconnected successfully"
+        - "Last WS block:"
+        - "Last HTTP block:"
     - name: eth-usdt-telegram-monitor
       project: eth-usdt
       critical: true
+      ignore_log_patterns:
+        - "WebSocket decoded 0 events while HTTP backfill advanced"
+        - "WebSocket appears stalled"
+        - "WebSocket reconnected successfully"
+        - "Last WS block:"
+        - "Last HTTP block:"
     - name: sheets-sync
       project: sheets-sync
       critical: true
