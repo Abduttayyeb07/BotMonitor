@@ -129,6 +129,11 @@ docker:
         - "You have used all your credits"
         - "account is expired"
         - "Retrying this range next tick"
+        - "WebSocket decoded 0 events while HTTP backfill advanced"
+        - "WebSocket appears stalled"
+        - "WebSocket reconnected successfully"
+        - "Last WS block:"
+        - "Last HTTP block:"
     - name: tokenx-vault-postgres
       project: tokenx-vault
       critical: true
@@ -166,6 +171,10 @@ docker:
       project: bep20-usdt
       critical: true
       ignore_log_patterns:
+        - "402 Payment Required"
+        - "You have used all your credits"
+        - "account is expired"
+        - "Retrying this range next tick"
         - "WebSocket decoded 0 events while HTTP backfill advanced"
         - "WebSocket appears stalled"
         - "WebSocket reconnected successfully"
