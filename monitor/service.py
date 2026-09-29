@@ -39,8 +39,12 @@ def incident_title(incident_type: str) -> str:
 
 
 def issue_text(incident: dict) -> str:
+    if incident["incident_type"] == "CONTAINER_UNHEALTHY":
+        detail = incident["message"].split("; health-check output:", 1)
+        if len(detail) == 2 and detail[1].strip():
+            return f"Docker reported the container health status as unhealthy. Health output: {detail[1].strip()}"
+        return "Docker reported the container health status as unhealthy."
     messages = {
-        "CONTAINER_UNHEALTHY": f"Docker reported the container health status as unhealthy.",
         "CONTAINER_DOWN": "Docker reported that the container is down.",
         "SYSTEMD_DOWN": "systemd reported that the service is not active.",
         "HIGH_MEMORY": "Host memory usage exceeded the configured threshold.",
@@ -57,15 +61,15 @@ def message_for(prefix: str, incident: dict) -> str:
     ending_label = "Recovered At" if recovered else "Last Detected"
     ending_value = incident.get("resolved_at") if recovered else incident.get("last_seen")
     return (f"{heading}\n\n"
-            f"<b>Project:</b> <code>{html.escape(str(incident['project']))}</code>\n"
-            f"<b>Service:</b> <code>{html.escape(str(incident['service']))}</code>\n"
-            f"<b>Incident:</b> {html.escape(incident_title(incident['incident_type']))}\n"
-            f"<b>Severity:</b> {html.escape(str(incident['severity']))}\n"
-            f"<b>Issue:</b> {html.escape(issue_text(incident))}\n"
-            f"<b>Status:</b> {status}\n"
-            f"<b>Occurrences:</b> {incident['occurrences']}\n"
-            f"<b>First Detected:</b> {local_time(incident['first_seen'])}\n"
-            f"<b>{ending_label}:</b> {local_time(ending_value)}")
+            f"<b>Project</b>  <code>{html.escape(str(incident['project']))}</code>\n"
+            f"<b>Service</b>  <code>{html.escape(str(incident['service']))}</code>\n"
+            f"<b>Incident</b>  {html.escape(incident_title(incident['incident_type']))}\n"
+            f"<b>Severity</b>  {html.escape(str(incident['severity']))}\n"
+            f"<b>Issue</b>  {html.escape(issue_text(incident))}\n"
+            f"<b>Status</b>  {status}\n"
+            f"<b>Occurrences</b>  {incident['occurrences']}\n"
+            f"<b>First Detected</b>  {local_time(incident['first_seen'])}\n"
+            f"<b>{ending_label}</b>  {local_time(ending_value)}")
 
 
 def main() -> None:
@@ -80,7 +84,7 @@ def main() -> None:
                                 chat_ids,
                                 telegram_config.get("enabled", True))
     panel = TelegramBotPanel(env(telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")), chat_ids,
-                             config.get("projects", {}))
+                             config.get("projects", {}), config.get("allow_container_restart", False))
     running = True
     def stop(_signum, _frame):
         nonlocal running

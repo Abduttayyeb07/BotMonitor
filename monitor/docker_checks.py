@@ -30,7 +30,10 @@ def checks(config: dict[str, Any]) -> list[dict[str, str]]:
                 continue
             health = state.get("Health", {}).get("Status")
             if health in {"unhealthy", "starting"}:
-                findings.append({"project": project, "service": container.name, "type": "CONTAINER_UNHEALTHY", "severity": "ERROR", "message": f"Docker health status is {health}"})
+                health_log = state.get("Health", {}).get("Log", [])
+                output = health_log[-1].get("Output", "").strip() if health_log else ""
+                detail = f"; health-check output: {output[-1200:]}" if output else ""
+                findings.append({"project": project, "service": container.name, "type": "CONTAINER_UNHEALTHY", "severity": "ERROR", "message": f"Docker health status is {health}{detail}"})
     except Exception as exc:
         log.exception("Docker inspection failed")
         findings.append({"project": "host", "service": "docker", "type": "DOCKER_UNAVAILABLE", "severity": "CRITICAL", "message": str(exc)})

@@ -1,6 +1,7 @@
 poll_interval_seconds: 30
 database_path: /data/incidents.db
 systemd_status_path: /data/systemd-status.json
+allow_container_restart: false
 
 thresholds:
   disk_warning_percent: 80

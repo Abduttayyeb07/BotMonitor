@@ -50,10 +50,11 @@ def uptime(started_at: str | None) -> str:
 
 
 class TelegramBotPanel:
-    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any]):
+    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False):
         self.token = token
         self.allowed_chat_ids = set(allowed_chat_ids)
         self.projects = projects or {}
+        self.allow_restart = allow_restart
         self.stop_event = threading.Event()
         self.offset = 0
         self.api_url = f"https://api.telegram.org/bot{token}" if token else ""
@@ -170,6 +171,36 @@ class TelegramBotPanel:
                     f"<b>Restarts:</b> {restarts}\n"
                     f"<b>Exit code:</b> {state.get('ExitCode', 'unknown')}\n\n"
                     f"<b>Recent logs</b>\n<pre>{logs}</pre>")
+        buttons = [[{"text": "🔄 Refresh", "callback_data": f"container:{group_id}:{project_id}:{index}"}]]
+        if self.allow_restart:
+            buttons.append([{"text": "♻️ Restart container", "callback_data": f"restart-confirm:{group_id}:{project_id}:{index}"}])
+        buttons.append([{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}])
+        return text, buttons
+
+    def restart_confirm_page(self, group_id: str, project_id: str, index: int) -> tuple[str, list[list[dict[str, str]]]]:
+        project = self.project_by_id(group_id, project_id)
+        names = project.get("containers", []) if project else []
+        if not project or index < 0 or index >= len(names):
+            return "<b>Container not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        name = html.escape(names[index])
+        return (f"⚠️ <b>Confirm restart</b>\n\nRestart <code>{name}</code>?\n\n"
+                "This will briefly interrupt the container."), [
+                    [{"text": "✅ Yes, restart", "callback_data": f"restart:{group_id}:{project_id}:{index}"},
+                     {"text": "❌ Cancel", "callback_data": f"container:{group_id}:{project_id}:{index}"}]
+                ]
+
+    def restart_container(self, group_id: str, project_id: str, index: int) -> tuple[str, list[list[dict[str, str]]]]:
+        project = self.project_by_id(group_id, project_id)
+        names = project.get("containers", []) if project else []
+        if not project or index < 0 or index >= len(names):
+            return "<b>Container not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        name = names[index]
+        try:
+            container = docker.from_env().containers.get(name)
+            container.restart(timeout=20)
+            text = f"✅ <b>Restart requested</b>\n\nContainer <code>{html.escape(name)}</code> is restarting."
+        except Exception as exc:
+            text = f"❌ <b>Restart failed</b>\n\n<code>{html.escape(str(exc))}</code>"
         return text, [[{"text": "🔄 Refresh", "callback_data": f"container:{group_id}:{project_id}:{index}"}],
                       [{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}]]
 
@@ -221,6 +252,12 @@ class TelegramBotPanel:
         elif data.startswith("container:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.container_page(group_id, project_id, int(index))
+        elif data.startswith("restart-confirm:") and self.allow_restart:
+            _, group_id, project_id, index = data.split(":", 3)
+            text, keyboard = self.restart_confirm_page(group_id, project_id, int(index))
+        elif data.startswith("restart:") and self.allow_restart:
+            _, group_id, project_id, index = data.split(":", 3)
+            text, keyboard = self.restart_container(group_id, project_id, int(index))
         elif data.startswith("service:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.service_page(group_id, project_id, int(index))
