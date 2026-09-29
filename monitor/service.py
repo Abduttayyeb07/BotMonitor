@@ -41,6 +41,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     interval = int(config.get("poll_interval_seconds", 30))
+    configured_containers = len(config.get("docker", {}).get("containers", []))
+    configured_systemd = len(config.get("systemd", {}).get("services", []))
+    log.info("central monitor started: poll_interval=%ss, docker_containers=%s, systemd_services=%s, telegram_chats=%s",
+             interval, configured_containers, configured_systemd, len(chat_ids))
     while running:
         active = []
         findings = host_checks(config.get("thresholds", {}))
