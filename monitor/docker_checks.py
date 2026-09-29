@@ -38,10 +38,12 @@ def log_checks(config: dict[str, Any], cursors: dict[str, int]) -> list[dict[str
             cursor = cursors.setdefault(container.name, int(time.time()))
             raw = container.logs(since=cursor, timestamps=True, tail=200).decode("utf-8", errors="replace")
             cursors[container.name] = int(time.time())
+            seen_lines: set[str] = set()
             for line in raw.splitlines():
                 clean = re.sub(r"^\S+\s+", "", line).strip()
-                if not clean or any(pattern.search(clean) for pattern in ignores):
+                if not clean or clean in seen_lines or any(pattern.search(clean) for pattern in ignores):
                     continue
+                seen_lines.add(clean)
                 if not any(pattern.search(clean) for pattern in item_patterns):
                     continue
                 findings.append({

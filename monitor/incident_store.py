@@ -14,9 +14,12 @@ def now() -> str:
 
 def normalize(message: str) -> str:
     value = message.lower().strip()
+    value = re.sub(r"\bblocks?\s+\d+(?:\s*[-–]\s*\d+)?\b", "block <range>", value)
+    value = re.sub(r"\bblock(?:height|number)?[=: ]+\d+\b", "block <number>", value)
     value = re.sub(r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b", "<uuid>", value)
     value = re.sub(r"\b0x[0-9a-f]+\b", "<hex>", value)
     value = re.sub(r"\b\d{10,}\b", "<number>", value)
+    value = re.sub(r"\b\d+\s*[-–]\s*\d+\b", "<range>", value)
     value = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<ip>", value)
     return re.sub(r"\s+", " ", value)
 
@@ -53,8 +56,9 @@ class IncidentStore:
             self.db.commit()
             return dict(self.db.execute("SELECT * FROM incidents WHERE fingerprint = ?", (key,)).fetchone()), True
 
-        last_alert = datetime.fromisoformat(row["last_alert_at"]) if row["last_alert_at"] else None
-        should_alert = row["status"] == "RECOVERED" or last_alert is None or (current - last_alert).total_seconds() >= cooldown_seconds
+        # One notification per incident lifecycle. Repeated observations stay
+        # active silently until recovery, preventing reminder spam.
+        should_alert = row["status"] == "RECOVERED"
         self.db.execute("""UPDATE incidents SET last_seen=?, occurrences=occurrences+1,
                            status='OPEN', message=?, resolved_at=NULL,
                            last_alert_at=CASE WHEN ? THEN ? ELSE last_alert_at END
