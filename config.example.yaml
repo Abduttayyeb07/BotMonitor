@@ -144,6 +144,60 @@ docker:
       project: sheets-sync
       critical: true
 
+projects:
+  frontend:
+    title: Frontend
+    items:
+      - id: beencointernalcomms
+        name: Beencointernalcomms
+        containers:
+          - beenco-connect-portal-1
+          - beenco-connect-postgres-1
+          - beenco-connect-redis-1
+          - beenco-connect-kafka-1
+      - id: beencomindshub
+        name: Beencomindshub
+        containers:
+          - beencomindshub--web-1
+          - beencomindshub--api-1
+          - beencomindshub--model-gateway-1
+      - id: liquidity-provider
+        name: Liquidity Provider
+        containers:
+          - liquidityprovider-frontend
+          - volumebot-pair-3
+          - volumebot-pair-2
+          - volumebot-pair-5
+          - volumebot-pair-6
+          - volumebot-pair-7
+          - volumebot-pair-4
+          - volumebot-pair-1
+          - volumebot-db
+      - id: vault-automator
+        name: VaultAutomator
+        containers:
+          - vault-automater-worker-1
+          - vault-automater-web-1
+          - vault-automater-api-1
+      - id: ethzigliquid
+        name: EthZigLiquid
+        containers:
+          - ethzigiquid-web-1
+          - ethzigiquid-api-1
+          - ethzigiquid-postgres-1
+      - id: arkive
+        name: Arkive
+        containers:
+          - arkive
+          - arkive-postgres
+      - id: zigexchange
+        name: ZigExchange
+        containers:
+          - zig_frontend
+          - zig_backend
+          - zig_bot
+          - zig_postgres
+
 systemd:
   # Host systemd is outside the Docker container boundary.
   enabled: false

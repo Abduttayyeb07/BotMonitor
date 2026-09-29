@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import threading
 import time
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from .config import env, load_config
 from .docker_checks import checks as docker_checks
 from .incident_store import IncidentStore, fingerprint
 from .notifier import TelegramNotifier
+from .telegram_bot import TelegramBotPanel
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -34,6 +36,8 @@ def main() -> None:
     notifier = TelegramNotifier(env(telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")),
                                 chat_ids,
                                 telegram_config.get("enabled", True))
+    panel = TelegramBotPanel(env(telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")), chat_ids,
+                             config.get("projects", {}))
     running = True
     def stop(_signum, _frame):
         nonlocal running
@@ -45,6 +49,8 @@ def main() -> None:
     configured_systemd = len(config.get("systemd", {}).get("services", []))
     log.info("central monitor started: poll_interval=%ss, docker_containers=%s, systemd_services=%s, telegram_chats=%s",
              interval, configured_containers, configured_systemd, len(chat_ids))
+    panel_thread = threading.Thread(target=panel.run, name="telegram-panel", daemon=True)
+    panel_thread.start()
     while running:
         active = []
         findings = host_checks(config.get("thresholds", {}))
@@ -62,3 +68,4 @@ def main() -> None:
         for incident in store.recover_stale(set(active)):
             notifier.send(message_for("✅ INCIDENT RECOVERED", incident))
         time.sleep(interval)
+    panel.stop()
