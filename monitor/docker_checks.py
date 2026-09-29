@@ -113,3 +113,31 @@ def checks(config: dict[str, Any]) -> list[dict[str, str]]:
         log.exception("Docker inspection failed")
         findings.append({"project": "host", "service": "docker", "type": "DOCKER_UNAVAILABLE", "severity": "CRITICAL", "message": str(exc)})
     return findings
+
+
+def snapshot(config: dict[str, Any]) -> dict[str, int]:
+    """Return a lightweight inventory summary for operational logging."""
+    configured = {item["name"] for item in (config.get("containers") or [])}
+    result = {"configured": len(configured), "running": 0, "healthy": 0, "unhealthy": 0, "stopped": 0, "missing": 0}
+    if not config.get("enabled", True):
+        return result
+    try:
+        containers = {container.name: container for container in docker.from_env().containers.list(all=True)}
+        for name in configured:
+            container = containers.get(name)
+            if container is None:
+                result["missing"] += 1
+                continue
+            state = container.attrs.get("State", {})
+            if state.get("Status") != "running":
+                result["stopped"] += 1
+                continue
+            result["running"] += 1
+            health = state.get("Health", {}).get("Status")
+            if health == "unhealthy":
+                result["unhealthy"] += 1
+            else:
+                result["healthy"] += 1
+    except Exception:
+        log.exception("Docker summary collection failed")
+    return result

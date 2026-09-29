@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .checks import endpoint_checks, host_checks, systemd_checks
 from .config import env, load_config
-from .docker_checks import checks as docker_checks, log_checks
+from .docker_checks import checks as docker_checks, log_checks, snapshot as docker_snapshot
 from .incident_store import IncidentStore, fingerprint
 from .notifier import TelegramNotifier
 from .telegram_bot import TelegramBotPanel
@@ -124,10 +124,18 @@ def main() -> None:
     configured_systemd = len(config.get("systemd", {}).get("services") or [])
     log.info("central monitor started: poll_interval=%ss, docker_containers=%s, systemd_services=%s, telegram_chats=%s",
              interval, configured_containers, configured_systemd, len(chat_ids))
+    groups = config.get("projects", {})
+    log.info("monitoring groups: %s", ", ".join(group.get("title", name) for name, group in groups.items()))
+    log.info("monitoring mode: container_state=true, docker_health=true, systemd=true, application_log_alerts=%s, container_restart=%s",
+             config.get("docker", {}).get("log_monitoring", {}).get("enabled", False),
+             config.get("allow_container_restart", False))
     panel_thread = threading.Thread(target=panel.run, name="telegram-panel", daemon=True)
     panel_thread.start()
     log_cursors: dict[str, int] = {}
+    poll_number = 0
+    summary_every = max(1, int(config.get("summary_interval_seconds", 300) / max(interval, 1)))
     while running:
+        poll_number += 1
         active = []
         findings = host_checks(config.get("thresholds", {}))
         findings += docker_checks(config.get("docker", {}))
@@ -145,5 +153,10 @@ def main() -> None:
                 notifier.send(message_for("🚨 INCIDENT OPEN / STILL ACTIVE", incident))
         for incident in store.recover_stale(set(active)):
             notifier.send(message_for("✅ INCIDENT RECOVERED", incident))
+        if poll_number == 1 or poll_number % summary_every == 0:
+            summary = docker_snapshot(config.get("docker", {}))
+            active_count = store.db.execute("SELECT COUNT(*) FROM incidents WHERE status='OPEN'").fetchone()[0]
+            log.info("monitoring summary: running=%s healthy=%s unhealthy=%s stopped=%s missing=%s active_incidents=%s findings_this_poll=%s",
+                     summary["running"], summary["healthy"], summary["unhealthy"], summary["stopped"], summary["missing"], active_count, len(findings))
         time.sleep(interval)
     panel.stop()
