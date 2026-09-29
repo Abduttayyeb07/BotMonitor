@@ -95,6 +95,15 @@ class TelegramBotPanel:
 
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:
         group = self.projects.get(group_id, {})
+        service_only = group.get("items") and all((item.get("services") and not item.get("containers")) for item in group["items"])
+        if service_only:
+            buttons = []
+            for project in group["items"]:
+                for index, service in enumerate(project.get("services", [])):
+                    buttons.append({"text": f"⚙️ {service['name']}", "callback_data": f"service:{group_id}:{project['id']}:{index}"})
+            rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+            rows.append([{"text": "⬅️ Groups", "callback_data": "home"}])
+            return rows
         buttons = []
         for project in group.get("items", []):
             buttons.append({"text": f"📊 {project['name']}", "callback_data": f"project:{group_id}:{project['id']}"})
@@ -245,7 +254,9 @@ class TelegramBotPanel:
         elif data.startswith("group:"):
             group_id = data.split(":", 1)[1]
             group = self.projects.get(group_id, {})
-            text, keyboard = f"📁 <b>{esc(group.get('title', group_id))}</b>\n\nChoose a project:", self.project_keyboard(group_id)
+            service_only = group.get("items") and all((item.get("services") and not item.get("containers")) for item in group["items"])
+            label = "service" if service_only else "project"
+            text, keyboard = f"📁 <b>{esc(group.get('title', group_id))}</b>\n\nChoose a {label}:", self.project_keyboard(group_id)
         elif data.startswith("project:"):
             _, group_id, project_id = data.split(":", 2)
             text, keyboard = self.project_page(group_id, project_id)
