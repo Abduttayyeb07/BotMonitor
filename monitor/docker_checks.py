@@ -1,11 +1,56 @@
 from __future__ import annotations
 
 import logging
+import re
+import time
 from typing import Any
 
 import docker
 
 log = logging.getLogger(__name__)
+
+DEFAULT_ERROR_PATTERNS = (
+    r"\btraceback\b", r"\b(fatal|critical|panic|exception)\b",
+    r"\b(unhandled|uncaught)\b", r"\b(error|err)\b",
+    r"connection refused", r"connection reset", r"timeout", r"timed out",
+    r"database.*(failed|error|refused|unavailable)", r"rpc.*(failed|error|timeout)",
+    r"promise rejection", r"out of memory", r"oom killed",
+)
+
+
+def log_checks(config: dict[str, Any], cursors: dict[str, int]) -> list[dict[str, str]]:
+    """Read only new Docker log lines and turn actionable errors into findings."""
+    if not config.get("enabled", True) or not config.get("log_monitoring", {}).get("enabled", True):
+        return []
+    findings = []
+    patterns = [re.compile(pattern, re.IGNORECASE) for pattern in config.get("log_monitoring", {}).get("error_patterns", DEFAULT_ERROR_PATTERNS)]
+    ignores = [re.compile(pattern, re.IGNORECASE) for pattern in config.get("log_monitoring", {}).get("ignore_patterns", [])]
+    try:
+        client = docker.from_env()
+        configured = {item["name"]: item for item in (config.get("containers") or [])}
+        for container in client.containers.list(all=False):
+            item = configured.get(container.name)
+            if item is None:
+                continue
+            cursor = cursors.setdefault(container.name, int(time.time()))
+            raw = container.logs(since=cursor, timestamps=True, tail=200).decode("utf-8", errors="replace")
+            cursors[container.name] = int(time.time())
+            for line in raw.splitlines():
+                clean = re.sub(r"^\S+\s+", "", line).strip()
+                if not clean or any(pattern.search(clean) for pattern in ignores):
+                    continue
+                if not any(pattern.search(clean) for pattern in patterns):
+                    continue
+                findings.append({
+                    "project": item.get("project", container.name),
+                    "service": container.name,
+                    "type": "APPLICATION_LOG_ERROR",
+                    "severity": item.get("log_severity", "ERROR"),
+                    "message": clean[-1600:],
+                })
+    except Exception:
+        log.exception("Docker log inspection failed")
+    return findings
 
 
 def checks(config: dict[str, Any]) -> list[dict[str, str]]:

@@ -18,6 +18,27 @@ cooldowns:
 docker:
   enabled: true
   log_tail_lines: 100
+  log_monitoring:
+    enabled: true
+    # These match new log lines even when the container remains RUNNING.
+    error_patterns:
+      - "\\btraceback\\b"
+      - "\\b(fatal|critical|panic|exception)\\b"
+      - "\\b(unhandled|uncaught)\\b"
+      - "\\b(error|err)\\b"
+      - "connection refused"
+      - "connection reset"
+      - "timeout"
+      - "timed out"
+      - "database.*(failed|error|refused|unavailable)"
+      - "rpc.*(failed|error|timeout)"
+      - "promise rejection"
+      - "out of memory"
+      - "oom killed"
+    ignore_patterns:
+      - "retrying request"
+      - "temporary websocket disconnect"
+      - "rate limit retry"
   containers:
     - name: beenco-connect-portal-1
       project: beenco-connect

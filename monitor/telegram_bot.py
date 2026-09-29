@@ -85,17 +85,22 @@ class TelegramBotPanel:
             current_status = "🟢 All systems operational"
         updated = datetime.now(ZoneInfo("Asia/Karachi")).strftime("%d %b %Y, %H:%M PKT")
         return ("🤖 <b>Central Bot Monitor</b>\n\n"
-                "Your live control panel for all frontend applications, Docker bots, and system services.\n\n"
-                "<b>Monitoring overview</b>\n\n"
-                f"🖥 <b>Frontend projects:</b> {len(frontend)}\n"
-                f"🐳 <b>Docker bot projects:</b> {len(docker_bots)}\n"
-                f"⚙️ <b>System services:</b> {system_services}\n"
-                f"📦 <b>Docker containers:</b> {len(container_names)}\n\n"
-                "<b>Current status</b>\n\n"
+                "Live monitoring and control for frontend applications, Docker workloads, and system services.\n\n"
+                "<b>📊 Monitoring Overview</b>\n\n"
+                f"🖥 <b>Frontend Projects:</b> {len(frontend)}\n"
+                f"🐳 <b>Docker Bot Projects:</b> {len(docker_bots)}\n"
+                f"⚙️ <b>System Services:</b> {system_services}\n"
+                f"📦 <b>Docker Containers:</b> {len(container_names)}\n\n"
+                "<b>🚨 Current Status</b>\n\n"
                 f"{current_status}\n"
-                f"⚠️ <b>Active incidents:</b> {active_incidents}\n"
-                f"🔄 <b>Last update:</b> {updated}\n\n"
-                "Select a section below to view project health, uptime, logs, errors, and service controls.")
+                f"<b>Active Incidents:</b> {active_incidents}\n\n"
+                f"🔄 <b>Last Updated:</b> {updated}\n\n"
+                "Select a section below to view:\n\n"
+                "• Project health\n"
+                "• Uptime and availability\n"
+                "• Container status\n"
+                "• Logs and errors\n"
+                "• Service controls")
 
     def api(self, method: str, payload: dict[str, Any], timeout: int = 35) -> dict[str, Any] | None:
         try:

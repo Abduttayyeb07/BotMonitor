@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .checks import endpoint_checks, host_checks, systemd_checks
 from .config import env, load_config
-from .docker_checks import checks as docker_checks
+from .docker_checks import checks as docker_checks, log_checks
 from .incident_store import IncidentStore, fingerprint
 from .notifier import TelegramNotifier
 from .telegram_bot import TelegramBotPanel
@@ -62,15 +62,15 @@ def message_for(prefix: str, incident: dict) -> str:
     ending_label = "Recovered At" if recovered else "Last Detected"
     ending_value = incident.get("resolved_at") if recovered else incident.get("last_seen")
     return (f"{heading}\n\n"
-            f"<b>Project</b>  <code>{html.escape(str(incident['project']))}</code>\n"
-            f"<b>Service</b>  <code>{html.escape(str(incident['service']))}</code>\n"
-            f"<b>Incident</b>  {html.escape(incident_title(incident['incident_type']))}\n"
-            f"<b>Severity</b>  {html.escape(str(incident['severity']))}\n"
-            f"<b>Issue</b>  {html.escape(issue_text(incident))}\n"
-            f"<b>Status</b>  {status}\n"
-            f"<b>Occurrences</b>  {incident['occurrences']}\n"
-            f"<b>First Detected</b>  {local_time(incident['first_seen'])}\n"
-            f"<b>{ending_label}</b>  {local_time(ending_value)}")
+            f"<b>Project:</b> <code>{html.escape(str(incident['project']))}</code>\n"
+            f"<b>Service:</b> <code>{html.escape(str(incident['service']))}</code>\n"
+            f"<b>Incident:</b> {html.escape(incident_title(incident['incident_type']))}\n"
+            f"<b>Severity:</b> {html.escape(str(incident['severity']))}\n\n"
+            f"<b>Issue:</b> {html.escape(issue_text(incident))}\n\n"
+            f"<b>Status:</b> {status}\n"
+            f"<b>Occurrences:</b> {incident['occurrences']}\n\n"
+            f"<b>First Detected:</b> {local_time(incident['first_seen'])}\n"
+            f"<b>{ending_label}:</b> {local_time(ending_value)}")
 
 
 def collapse_project_failures(findings: list[dict], config: dict) -> list[dict]:
@@ -126,10 +126,12 @@ def main() -> None:
              interval, configured_containers, configured_systemd, len(chat_ids))
     panel_thread = threading.Thread(target=panel.run, name="telegram-panel", daemon=True)
     panel_thread.start()
+    log_cursors: dict[str, int] = {}
     while running:
         active = []
         findings = host_checks(config.get("thresholds", {}))
         findings += docker_checks(config.get("docker", {}))
+        findings += log_checks(config.get("docker", {}), log_cursors)
         findings += systemd_checks(config.get("systemd", {}), config.get("systemd_status_path", "/data/systemd-status.json"))
         findings += endpoint_checks(config.get("docker", {}).get("containers") or [])
         findings = collapse_project_failures(findings, config)
