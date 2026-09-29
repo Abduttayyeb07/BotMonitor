@@ -45,8 +45,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     interval = int(config.get("poll_interval_seconds", 30))
-    configured_containers = len(config.get("docker", {}).get("containers", []))
-    configured_systemd = len(config.get("systemd", {}).get("services", []))
+    configured_containers = len(config.get("docker", {}).get("containers") or [])
+    configured_systemd = len(config.get("systemd", {}).get("services") or [])
     log.info("central monitor started: poll_interval=%ss, docker_containers=%s, systemd_services=%s, telegram_chats=%s",
              interval, configured_containers, configured_systemd, len(chat_ids))
     panel_thread = threading.Thread(target=panel.run, name="telegram-panel", daemon=True)
@@ -56,7 +56,7 @@ def main() -> None:
         findings = host_checks(config.get("thresholds", {}))
         findings += docker_checks(config.get("docker", {}))
         findings += systemd_checks(config.get("systemd", {}))
-        findings += endpoint_checks(config.get("docker", {}).get("containers", []))
+        findings += endpoint_checks(config.get("docker", {}).get("containers") or [])
         cooldowns = config.get("cooldowns", {})
         for finding in findings:
             key = fingerprint(finding["project"], finding["service"], finding["type"], finding["message"])

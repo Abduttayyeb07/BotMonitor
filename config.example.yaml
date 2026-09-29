@@ -308,11 +308,7 @@ projects:
 systemd:
   # Host systemd is outside the Docker container boundary.
   enabled: false
-  services:
-    # - name: example-worker
-    #   unit: example-worker.service
-    #   critical: true
-    #   heartbeat_timeout_seconds: 300
+  services: []
 
 heartbeats: []
 

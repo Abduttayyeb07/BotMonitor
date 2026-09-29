@@ -14,7 +14,7 @@ def checks(config: dict[str, Any]) -> list[dict[str, str]]:
         return findings
     try:
         client = docker.from_env()
-        configured = {item["name"]: item for item in config.get("containers", [])}
+        configured = {item["name"]: item for item in (config.get("containers") or [])}
         containers = client.containers.list(all=True)
         for container in containers:
             item = configured.get(container.name)

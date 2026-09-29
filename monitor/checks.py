@@ -34,7 +34,7 @@ def systemd_checks(config: dict[str, Any]) -> list[dict[str, str]]:
     findings = []
     if not config.get("enabled", True):
         return findings
-    for item in config.get("services", []):
+    for item in (config.get("services") or []):
         unit = item["unit"]
         result = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=10)
         if result.stdout.strip() != "active":
