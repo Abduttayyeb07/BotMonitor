@@ -40,6 +40,27 @@ docker:
       - "retrying request"
       - "temporary websocket disconnect"
       - "rate limit retry"
+      # Expected provider fallback/reconnect noise across all bots.
+      - "402 Payment Required"
+      - "You have used all your credits"
+      - "account is expired"
+      - "Retrying this range next tick"
+      - "WS reconnecting"
+      - "WebSocket reconnecting"
+      - "WebSocket reconnected successfully"
+      - "WebSocket appears stalled"
+      - "Trying fallback WebSocket endpoint"
+      - "WebSocket subscription/endpoint issue"
+      - "received result for unknown id"
+      - "Subscription timed out"
+      - "WebSocket decoded:"
+      - "WebSocket matched:"
+      - "HTTP backfill scanned:"
+      - "HTTP backfill matched:"
+      - "Alerts delivered:"
+      - "ETH USDT Monitor Health"
+      - "Ethereum USDC WebSocket decoded:"
+      - "BNB Smart Chain USDT WebSocket decoded:"
   containers:
     - name: beenco-connect-portal-1
       project: beenco-connect
@@ -211,9 +232,11 @@ docker:
 projects:
   frontend:
     title: Frontend
+    icon: 🖥️
     items:
       - id: beencointernalcomms
         name: Beencointernalcomms
+        menu_name: Beencoin Internal
         containers:
           - beenco-connect-portal-1
           - beenco-connect-postgres-1
@@ -221,12 +244,14 @@ projects:
           - beenco-connect-kafka-1
       - id: beencomindshub
         name: Beencomindshub
+        menu_name: Beencomindshub
         containers:
           - beencomindshub--web-1
           - beencomindshub--api-1
           - beencomindshub--model-gateway-1
       - id: liquidity-provider
         name: Liquidity Provider
+        menu_name: Liquidity Provider
         containers:
           - liquidityprovider-frontend
           - volumebot-pair-3
@@ -239,23 +264,27 @@ projects:
           - volumebot-db
       - id: vault-automator
         name: VaultAutomator
+        menu_name: VaultAutomator
         containers:
           - vault-automater-worker-1
           - vault-automater-web-1
           - vault-automater-api-1
       - id: ethzigliquid
         name: EthZigLiquid
+        menu_name: EthZigLiquid
         containers:
           - ethzigiquid-web-1
           - ethzigiquid-api-1
           - ethzigiquid-postgres-1
       - id: arkive
         name: Arkive
+        menu_name: Arkive
         containers:
           - arkive
           - arkive-postgres
       - id: zigexchange
         name: ZigExchange
+        menu_name: ZigExchange
         containers:
           - zig_frontend
           - zig_backend
@@ -263,9 +292,11 @@ projects:
           - zig_postgres
   bots_docker:
     title: Bots (Docker)
+    icon: 🐳
     items:
       - id: marketzig
         name: Zig Whale Bot
+        menu_name: Zig Whale Bot
         compose_project: marketzig
         working_dir: /root/saad/MarketZig
         compose_file: /root/saad/MarketZig/docker-compose.yml
@@ -273,6 +304,7 @@ projects:
           - zig-whale-bot
       - id: zig-alert-bot
         name: Zig Alert Bot
+        menu_name: Zig Alert Bot
         compose_project: zig-alert-bot
         working_dir: /root/saad/zig-alert-bot
         compose_file: /root/saad/zig-alert-bot/docker-compose.yml
@@ -280,6 +312,7 @@ projects:
           - zig-alert-bot
       - id: zig-usd-only-alerts
         name: Zig USD Only Alerts
+        menu_name: Zig USD Alerts
         compose_project: zig-usd-only-alerts
         working_dir: /root/saad/zig-usd-only-alerts
         compose_file: /root/saad/zig-usd-only-alerts/docker-compose.yml
@@ -287,6 +320,7 @@ projects:
           - zig-usd-only-alerts-zig-only-alerts-1
       - id: wallet-monitor
         name: Wallet Monitor
+        menu_name: Wallet Monitor
         compose_project: wallet-monitor
         working_dir: /root/saad/wallet-monitor
         compose_file: /root/saad/wallet-monitor/docker-compose.yml
@@ -294,6 +328,7 @@ projects:
           - wallet-monitor
       - id: patronicluster
         name: Zigchain Bot
+        menu_name: Zigchain Bot
         compose_project: patronicluster
         working_dir: /root/saad/patroni_monitoring/PatroniCluster
         compose_file: /root/saad/patroni_monitoring/PatroniCluster/docker-compose.yml
@@ -301,6 +336,7 @@ projects:
           - zigchain-bot
       - id: stakeunstake
         name: Zigchain Monitor
+        menu_name: Zigchain Monitor
         compose_project: stakeunstake
         working_dir: /root/saad/StakeUnstake
         compose_file: /root/saad/StakeUnstake/docker-compose.yml
@@ -308,6 +344,7 @@ projects:
           - zigchain-monitor
       - id: launches
         name: MDF Tracker
+        menu_name: MDF Tracker
         compose_project: launches
         working_dir: /root/saad/Launches
         compose_file: /root/saad/Launches/docker-compose.yml
@@ -315,6 +352,7 @@ projects:
           - mdf-tracker
       - id: highlaunches
         name: HighBuy Monitor
+        menu_name: HighBuy Monitor
         compose_project: highlaunches
         working_dir: /root/saad/HighLaunches
         compose_file: /root/saad/HighLaunches/docker-compose.yml
@@ -322,6 +360,7 @@ projects:
           - highbuy-monitor
       - id: nawavaldora
         name: Zigchain Wallet Monitor
+        menu_name: Wallet Monitor
         compose_project: nawavaldora
         working_dir: /root/saad/NawaValdora
         compose_file: /root/saad/NawaValdora/docker-compose.yml
@@ -329,6 +368,7 @@ projects:
           - zigchain-wallet-monitor
       - id: tokenx-vault
         name: TokenX Vault Monitors
+        menu_name: TokenX Vault
         compose_project: tokenx-vault
         working_dir: /root/saad/TokenX-Vault
         compose_file: /root/saad/TokenX-Vault/docker-compose.yml
@@ -337,6 +377,7 @@ projects:
           - tokenx-vault-postgres
       - id: bep20
         name: BEP20 USDT Telegram Monitor
+        menu_name: BEP20 USDT
         compose_project: bep20
         working_dir: /root/saad/bep20
         compose_file: /root/saad/bep20/docker-compose.yml
@@ -344,6 +385,7 @@ projects:
           - bep20-usdt-telegram-monitor
       - id: ethtethertoken
         name: ETH USDT Telegram Monitor
+        menu_name: ETH USDT
         compose_project: ethtethertoken
         working_dir: /root/saad/EthTethertoken
         compose_file: /root/saad/EthTethertoken/docker-compose.yml
@@ -351,20 +393,24 @@ projects:
           - eth-usdt-telegram-monitor
       - id: sheetszahoor
         name: Sheets Sync
+        menu_name: Sheets Sync
         compose_project: sheetszahoor
         working_dir: /root/saad/sheetszahoor
         compose_file: /root/saad/sheetszahoor/docker-compose.yml
         containers:
           - sheets-sync
   bots_systemd:
-    title: Bots (System Service)
+    title: System Services
+    icon: ⚙️
     items:
       - id: system-services
         name: System Services
         services:
           - name: wallet-watchman
+            menu_name: Wallet Watchman
             unit: wallet-watchman.service
           - name: zigchain-exporter
+            menu_name: Zigchain Exporter
             unit: zigchain-exporter.service
 
 systemd:

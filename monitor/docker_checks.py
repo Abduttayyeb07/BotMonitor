@@ -17,6 +17,31 @@ DEFAULT_ERROR_PATTERNS = (
     r"promise rejection", r"out of memory", r"oom killed",
 )
 
+# Expected provider/fallback noise. These are intentionally built into the
+# monitor so a deployment cannot accidentally alert on them because of a
+# missing or stale YAML ignore rule.
+BUILTIN_IGNORE_PATTERNS = (
+    r"402\s+Payment\s+Required",
+    r"You have used all your credits",
+    r"account is expired",
+    r"Retrying this range next tick",
+    r"(?:WS|WebSocket) reconnecting",
+    r"WebSocket reconnected successfully",
+    r"WebSocket appears stalled",
+    r"Trying fallback WebSocket endpoint",
+    r"WebSocket subscription/endpoint issue",
+    r"received result for unknown id",
+    r"Subscription timed out",
+    r"WebSocket decoded:",
+    r"WebSocket matched:",
+    r"HTTP backfill scanned:",
+    r"HTTP backfill matched:",
+    r"Alerts delivered:",
+    r"ETH USDT Monitor Health",
+    r"Ethereum USDC WebSocket decoded:",
+    r"BNB Smart Chain USDT WebSocket decoded:",
+)
+
 
 def log_checks(config: dict[str, Any], cursors: dict[str, int]) -> list[dict[str, str]]:
     """Read only new Docker log lines and turn actionable errors into findings."""
@@ -25,7 +50,7 @@ def log_checks(config: dict[str, Any], cursors: dict[str, int]) -> list[dict[str
     findings = []
     log_config = config.get("log_monitoring", {})
     patterns = [re.compile(pattern, re.IGNORECASE) for pattern in log_config.get("error_patterns", DEFAULT_ERROR_PATTERNS)]
-    global_ignores = [re.compile(pattern, re.IGNORECASE) for pattern in log_config.get("ignore_patterns", [])]
+    global_ignores = [re.compile(pattern, re.IGNORECASE) for pattern in (*BUILTIN_IGNORE_PATTERNS, *log_config.get("ignore_patterns", []))]
     try:
         client = docker.from_env()
         configured = {item["name"]: item for item in (config.get("containers") or [])}

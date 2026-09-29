@@ -133,8 +133,10 @@ class TelegramBotPanel:
     def group_keyboard(self) -> list[list[dict[str, str]]]:
         buttons = []
         for group_id, group in self.projects.items():
-            buttons.append({"text": f"📁 {group.get('title', group_id)}", "callback_data": f"group:{group_id}"})
-        return [buttons]
+            buttons.append({"text": f"{group.get('icon', '📁')} {group.get('title', group_id)}", "callback_data": f"group:{group_id}"})
+        if len(buttons) == 3:
+            return [buttons[:2], buttons[2:]]
+        return [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
 
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:
         group = self.projects.get(group_id, {})
@@ -143,13 +145,13 @@ class TelegramBotPanel:
             buttons = []
             for project in group["items"]:
                 for index, service in enumerate(project.get("services", [])):
-                    buttons.append({"text": f"⚙️ {service['name']}", "callback_data": f"service:{group_id}:{project['id']}:{index}"})
+                    buttons.append({"text": f"⚙️ {service.get('menu_name', service['name'])}", "callback_data": f"service:{group_id}:{project['id']}:{index}"})
             rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
             rows.append([{"text": "⬅️ Groups", "callback_data": "home"}])
             return rows
         buttons = []
         for project in group.get("items", []):
-            buttons.append({"text": f"📊 {project['name']}", "callback_data": f"project:{group_id}:{project['id']}"})
+            buttons.append({"text": f"📊 {project.get('menu_name', project['name'])}", "callback_data": f"project:{group_id}:{project['id']}"})
         rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
         rows.append([{"text": "⬅️ Groups", "callback_data": "home"}])
         return rows
