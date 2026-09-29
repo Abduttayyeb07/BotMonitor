@@ -17,12 +17,132 @@ docker:
   enabled: true
   log_tail_lines: 100
   containers:
-    # Use the exact Docker container name. Remove entries you do not want monitored.
-    # - name: wallet-watchman
-    #   project: wallet-watchman
-    #   critical: true
-    #   heartbeat_timeout_seconds: 300
-    #   health_url: http://host.docker.internal:8080/health
+    - name: beenco-connect-portal-1
+      project: beenco-connect
+      critical: true
+    - name: beenco-connect-postgres-1
+      project: beenco-connect
+      critical: true
+    - name: beenco-connect-redis-1
+      project: beenco-connect
+      critical: true
+    - name: beenco-connect-kafka-1
+      project: beenco-connect
+      critical: true
+    - name: beencomindshub--web-1
+      project: beencomindshub
+      critical: true
+    - name: beencomindshub--api-1
+      project: beencomindshub
+      critical: true
+    - name: beencomindshub--model-gateway-1
+      project: beencomindshub
+      critical: true
+    - name: zig-whale-bot
+      project: zig-whale-bot
+      critical: true
+    - name: zig-alert-bot
+      project: zig-alert-bot
+      critical: true
+    - name: zig-usd-only-alerts-zig-only-alerts-1
+      project: zig-usd-only-alerts
+      critical: true
+    - name: highbuy-monitor
+      project: highbuy-monitor
+      critical: true
+    - name: zigchain-wallet-monitor
+      project: zigchain-wallet-monitor
+      critical: true
+    - name: liquidityprovider-frontend
+      project: liquidityprovider
+      critical: true
+    - name: volumebot-pair-1
+      project: volumebot
+      critical: true
+    - name: volumebot-pair-2
+      project: volumebot
+      critical: true
+    - name: volumebot-pair-3
+      project: volumebot
+      critical: true
+    - name: volumebot-pair-4
+      project: volumebot
+      critical: true
+    - name: volumebot-pair-5
+      project: volumebot
+      critical: true
+    - name: volumebot-pair-6
+      project: volumebot
+      critical: true
+    - name: volumebot-pair-7
+      project: volumebot
+      critical: true
+    - name: volumebot-db
+      project: volumebot
+      critical: true
+    - name: vault-automater-worker-1
+      project: vault-automater
+      critical: true
+    - name: vault-automater-web-1
+      project: vault-automater
+      critical: true
+    - name: vault-automater-api-1
+      project: vault-automater
+      critical: true
+    - name: ethzigiquid-web-1
+      project: ethzigiquid
+      critical: true
+    - name: ethzigiquid-api-1
+      project: ethzigiquid
+      critical: true
+    - name: ethzigiquid-postgres-1
+      project: ethzigiquid
+      critical: true
+    - name: bsc-and-eth-token-monitor
+      project: bsc-and-eth-token-monitor
+      critical: true
+    - name: tokenx-vault-postgres
+      project: tokenx-vault
+      critical: true
+    - name: zigchain-detector-bot-1
+      project: zigchain-detector
+      critical: true
+    - name: zigchain-detector-db-1
+      project: zigchain-detector
+      critical: true
+    - name: fracks-backend
+      project: fracks
+      critical: true
+    - name: arkive
+      project: arkive
+      critical: true
+    - name: arkive-postgres
+      project: arkive
+      critical: true
+    - name: fracks-db
+      project: fracks
+      critical: true
+    - name: zig_frontend
+      project: zig
+      critical: true
+    - name: zig_backend
+      project: zig
+      critical: true
+    - name: zig_bot
+      project: zig
+      critical: true
+    - name: zig_postgres
+      project: zig
+      critical: true
+    - name: bep20-usdt-telegram-monitor
+      project: bep20-usdt
+      critical: true
+    - name: eth-usdt-telegram-monitor
+      project: eth-usdt
+      critical: true
+    - name: sheets-sync
+      project: sheets-sync
+      critical: true
 
 systemd:
   # Host systemd is outside the Docker container boundary.
