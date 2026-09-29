@@ -87,16 +87,18 @@ class TelegramBotPanel:
         self.api("editMessageText", payload)
 
     def group_keyboard(self) -> list[list[dict[str, str]]]:
-        rows = []
+        buttons = []
         for group_id, group in self.projects.items():
-            rows.append([{"text": f"📁 {group.get('title', group_id)}", "callback_data": f"group:{group_id}"}])
+            buttons.append({"text": f"📁 {group.get('title', group_id)}", "callback_data": f"group:{group_id}"})
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
         return rows
 
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:
         group = self.projects.get(group_id, {})
-        rows = []
+        buttons = []
         for project in group.get("items", []):
-            rows.append([{"text": f"📊 {project['name']}", "callback_data": f"project:{group_id}:{project['id']}"}])
+            buttons.append({"text": f"📊 {project['name']}", "callback_data": f"project:{group_id}:{project['id']}"})
+        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
         rows.append([{"text": "⬅️ Groups", "callback_data": "home"}])
         return rows
 
