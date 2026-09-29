@@ -19,7 +19,8 @@ docker:
   enabled: true
   log_tail_lines: 100
   log_monitoring:
-    enabled: true
+    # Container-only mode: application log lines do not create incidents.
+    enabled: false
     # These match new log lines even when the container remains RUNNING.
     error_patterns:
       - "\\btraceback\\b"
