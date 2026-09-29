@@ -124,6 +124,11 @@ docker:
     - name: bsc-and-eth-token-monitor
       project: bsc-and-eth-token-monitor
       critical: true
+      ignore_log_patterns:
+        - "402 Payment Required"
+        - "You have used all your credits"
+        - "account is expired"
+        - "Retrying this range next tick"
     - name: tokenx-vault-postgres
       project: tokenx-vault
       critical: true
