@@ -143,6 +143,18 @@ docker:
     - name: sheets-sync
       project: sheets-sync
       critical: true
+    - name: zigchain-bot
+      project: patronicluster
+      critical: true
+    - name: zigchain-monitor
+      project: stakeunstake
+      critical: true
+    - name: mdf-tracker
+      project: launches
+      critical: true
+    - name: wallet-monitor
+      project: wallet-monitor
+      critical: true
 
 projects:
   frontend:
@@ -197,6 +209,101 @@ projects:
           - zig_backend
           - zig_bot
           - zig_postgres
+  bots:
+    title: Bots
+    items:
+      - id: marketzig
+        name: Zig Whale Bot
+        compose_project: marketzig
+        working_dir: /root/saad/MarketZig
+        compose_file: /root/saad/MarketZig/docker-compose.yml
+        containers:
+          - zig-whale-bot
+      - id: zig-alert-bot
+        name: Zig Alert Bot
+        compose_project: zig-alert-bot
+        working_dir: /root/saad/zig-alert-bot
+        compose_file: /root/saad/zig-alert-bot/docker-compose.yml
+        containers:
+          - zig-alert-bot
+      - id: zig-usd-only-alerts
+        name: Zig USD Only Alerts
+        compose_project: zig-usd-only-alerts
+        working_dir: /root/saad/zig-usd-only-alerts
+        compose_file: /root/saad/zig-usd-only-alerts/docker-compose.yml
+        containers:
+          - zig-usd-only-alerts-zig-only-alerts-1
+      - id: wallet-monitor
+        name: Wallet Monitor
+        compose_project: wallet-monitor
+        working_dir: /root/saad/wallet-monitor
+        compose_file: /root/saad/wallet-monitor/docker-compose.yml
+        containers:
+          - wallet-monitor
+      - id: patronicluster
+        name: Zigchain Bot
+        compose_project: patronicluster
+        working_dir: /root/saad/patroni_monitoring/PatroniCluster
+        compose_file: /root/saad/patroni_monitoring/PatroniCluster/docker-compose.yml
+        containers:
+          - zigchain-bot
+      - id: stakeunstake
+        name: Zigchain Monitor
+        compose_project: stakeunstake
+        working_dir: /root/saad/StakeUnstake
+        compose_file: /root/saad/StakeUnstake/docker-compose.yml
+        containers:
+          - zigchain-monitor
+      - id: launches
+        name: MDF Tracker
+        compose_project: launches
+        working_dir: /root/saad/Launches
+        compose_file: /root/saad/Launches/docker-compose.yml
+        containers:
+          - mdf-tracker
+      - id: highlaunches
+        name: HighBuy Monitor
+        compose_project: highlaunches
+        working_dir: /root/saad/HighLaunches
+        compose_file: /root/saad/HighLaunches/docker-compose.yml
+        containers:
+          - highbuy-monitor
+      - id: nawavaldora
+        name: Zigchain Wallet Monitor
+        compose_project: nawavaldora
+        working_dir: /root/saad/NawaValdora
+        compose_file: /root/saad/NawaValdora/docker-compose.yml
+        containers:
+          - zigchain-wallet-monitor
+      - id: tokenx-vault
+        name: TokenX Vault Monitors
+        compose_project: tokenx-vault
+        working_dir: /root/saad/TokenX-Vault
+        compose_file: /root/saad/TokenX-Vault/docker-compose.yml
+        containers:
+          - bsc-and-eth-token-monitor
+          - tokenx-vault-postgres
+      - id: bep20
+        name: BEP20 USDT Telegram Monitor
+        compose_project: bep20
+        working_dir: /root/saad/bep20
+        compose_file: /root/saad/bep20/docker-compose.yml
+        containers:
+          - bep20-usdt-telegram-monitor
+      - id: ethtethertoken
+        name: ETH USDT Telegram Monitor
+        compose_project: ethtethertoken
+        working_dir: /root/saad/EthTethertoken
+        compose_file: /root/saad/EthTethertoken/docker-compose.yml
+        containers:
+          - eth-usdt-telegram-monitor
+      - id: sheetszahoor
+        name: Sheets Sync
+        compose_project: sheetszahoor
+        working_dir: /root/saad/sheetszahoor
+        compose_file: /root/saad/sheetszahoor/docker-compose.yml
+        containers:
+          - sheets-sync
 
 systemd:
   # Host systemd is outside the Docker container boundary.
