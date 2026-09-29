@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import logging
+import os
+import signal
+import time
+from pathlib import Path
+
+from .checks import endpoint_checks, host_checks, systemd_checks
+from .config import env, load_config
+from .docker_checks import checks as docker_checks
+from .incident_store import IncidentStore, fingerprint
+from .notifier import TelegramNotifier
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
+
+
+def message_for(prefix: str, incident: dict) -> str:
+    return (f"{prefix}\n\nSeverity: {incident['severity']}\nProject: {incident['project']}\n"
+            f"Service: {incident['service']}\nType: {incident['incident_type']}\n"
+            f"Message: {incident['message']}\nOccurrences: {incident['occurrences']}\n"
+            f"First seen: {incident['first_seen']}\nLast seen: {incident['last_seen']}")
+
+
+def main() -> None:
+    config = load_config(os.getenv("MONITOR_CONFIG", "config.yaml"))
+    store = IncidentStore(config.get("database_path", "data/incidents.db"))
+    telegram_config = config.get("telegram", {})
+    chat_ids_value = env(telegram_config.get("chat_ids_env", "TELEGRAM_CHAT_IDS"))
+    if not chat_ids_value:
+        chat_ids_value = env(telegram_config.get("chat_id_env", "TELEGRAM_CHAT_ID"))
+    chat_ids = [value.strip() for value in (chat_ids_value or "").split(",") if value.strip()]
+    notifier = TelegramNotifier(env(telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")),
+                                chat_ids,
+                                telegram_config.get("enabled", True))
+    running = True
+    def stop(_signum, _frame):
+        nonlocal running
+        running = False
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    interval = int(config.get("poll_interval_seconds", 30))
+    while running:
+        active = []
+        findings = host_checks(config.get("thresholds", {}))
+        findings += docker_checks(config.get("docker", {}))
+        findings += systemd_checks(config.get("systemd", {}))
+        findings += endpoint_checks(config.get("docker", {}).get("containers", []))
+        cooldowns = config.get("cooldowns", {})
+        for finding in findings:
+            key = fingerprint(finding["project"], finding["service"], finding["type"], finding["message"])
+            active.append(key)
+            cooldown = cooldowns.get("critical_seconds", 300) if finding["severity"] == "CRITICAL" else cooldowns.get("default_seconds", 900)
+            incident, should_alert = store.observe(key, finding["project"], finding["service"], finding["type"], finding["severity"], finding["message"], int(cooldown))
+            if should_alert:
+                notifier.send(message_for("🚨 INCIDENT OPEN / STILL ACTIVE", incident))
+        for incident in store.recover_stale(set(active)):
+            notifier.send(message_for("✅ INCIDENT RECOVERED", incident))
+        time.sleep(interval)

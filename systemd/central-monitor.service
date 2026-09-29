@@ -1,0 +1,20 @@
+[Unit]
+Description=Central bot monitoring and Telegram incident notifier
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/central-monitor
+ExecStart=/opt/central-monitor/.venv/bin/python -m monitor
+Restart=always
+RestartSec=10
+EnvironmentFile=-/etc/central-monitor/monitor.env
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/central-monitor/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

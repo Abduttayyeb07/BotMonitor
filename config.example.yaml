@@ -1,0 +1,45 @@
+poll_interval_seconds: 30
+database_path: /data/incidents.db
+
+thresholds:
+  disk_warning_percent: 80
+  disk_critical_percent: 90
+  memory_warning_percent: 85
+  memory_critical_percent: 95
+  cpu_warning_percent: 90
+  cpu_sustain_checks: 3
+
+cooldowns:
+  default_seconds: 900
+  critical_seconds: 300
+
+docker:
+  enabled: true
+  log_tail_lines: 100
+  containers:
+    # Use the exact Docker container name. Remove entries you do not want monitored.
+    # - name: wallet-watchman
+    #   project: wallet-watchman
+    #   critical: true
+    #   heartbeat_timeout_seconds: 300
+    #   health_url: http://host.docker.internal:8080/health
+
+systemd:
+  # Host systemd is outside the Docker container boundary.
+  enabled: false
+  services:
+    # - name: example-worker
+    #   unit: example-worker.service
+    #   critical: true
+    #   heartbeat_timeout_seconds: 300
+
+heartbeats: []
+
+telegram:
+  enabled: true
+  # Values should normally come from environment variables.
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  # Comma-separated IDs for multiple users, groups, or channels.
+  chat_ids_env: TELEGRAM_CHAT_IDS
+  # Legacy single-chat fallback:
+  chat_id_env: TELEGRAM_CHAT_ID
