@@ -31,4 +31,4 @@ networks:
       config:
         # Use a private subnet dedicated to this monitoring service.
         # Change it if it overlaps with an existing Docker/VPN/server network.
-        - subnet: 172.31.250.0/24
+        - subnet: 10.254.0.0/24
