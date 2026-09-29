@@ -1,0 +1,16 @@
+[Unit]
+Description=Central monitor host systemd collector
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/saad/BotMonitor
+ExecStart=/usr/bin/python3 /root/saad/BotMonitor/systemd/collector.py
+Restart=always
+RestartSec=5
+Environment=MONITOR_STATUS_FILE=/root/saad/BotMonitor/data/systemd-status.json
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import json
+from pathlib import Path
 import shutil
 import subprocess
 import time
@@ -30,15 +32,21 @@ def host_checks(thresholds: dict[str, Any]) -> list[dict[str, str]]:
     return findings
 
 
-def systemd_checks(config: dict[str, Any]) -> list[dict[str, str]]:
+def systemd_checks(config: dict[str, Any], status_path: str = "/data/systemd-status.json") -> list[dict[str, str]]:
     findings = []
     if not config.get("enabled", True):
         return findings
+    try:
+        snapshot = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        services = snapshot.get("services", {})
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+        return [{"project": "host", "service": "systemd-collector", "type": "SYSTEMD_COLLECTOR_MISSING", "severity": "CRITICAL", "message": f"Cannot read {status_path}: {exc}"}]
     for item in (config.get("services") or []):
         unit = item["unit"]
-        result = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=10)
-        if result.stdout.strip() != "active":
-            findings.append({"project": item.get("project", item["name"]), "service": item["name"], "type": "SYSTEMD_DOWN", "severity": "CRITICAL" if item.get("critical", True) else "ERROR", "message": f"systemd unit {unit} is {result.stdout.strip() or 'unknown'}"})
+        current = services.get(unit, {})
+        status = current.get("active_state", "unknown")
+        if status != "active":
+            findings.append({"project": item.get("project", item["name"]), "service": item["name"], "type": "SYSTEMD_DOWN", "severity": "CRITICAL" if item.get("critical", True) else "ERROR", "message": f"systemd unit {unit} is {status}"})
     return findings
 
 

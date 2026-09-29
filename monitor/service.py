@@ -55,7 +55,7 @@ def main() -> None:
         active = []
         findings = host_checks(config.get("thresholds", {}))
         findings += docker_checks(config.get("docker", {}))
-        findings += systemd_checks(config.get("systemd", {}))
+        findings += systemd_checks(config.get("systemd", {}), config.get("systemd_status_path", "/data/systemd-status.json"))
         findings += endpoint_checks(config.get("docker", {}).get("containers") or [])
         cooldowns = config.get("cooldowns", {})
         for finding in findings:

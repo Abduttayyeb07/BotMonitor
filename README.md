@@ -32,7 +32,26 @@ Stop it with:
 docker compose down
 ```
 
-Use `host.docker.internal` for health endpoints running on the host. Host systemd monitoring is disabled by default because systemd is outside the container boundary.
+Use `host.docker.internal` for health endpoints running on the host. Host systemd monitoring uses the separate collector described below.
+
+## Safe host systemd collector
+
+The host systemd collector is separate from the Docker monitor. It checks only the configured units, writes `data/systemd-status.json`, and does not mount the host D-Bus or systemd directories into Docker.
+
+On the server:
+
+```bash
+sudo cp systemd/central-monitor-systemd-collector.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now central-monitor-systemd-collector
+sudo systemctl status central-monitor-systemd-collector
+```
+
+Then rebuild the Docker monitor:
+
+```bash
+docker compose up -d --build
+```
 
 ## Local Python quick start
 

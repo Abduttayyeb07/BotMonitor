@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import logging
 import threading
 import time
@@ -109,6 +110,13 @@ class TelegramBotPanel:
         except Exception:
             return None
 
+    def systemd_status(self, unit: str) -> dict[str, Any]:
+        try:
+            with open("/data/systemd-status.json", encoding="utf-8") as handle:
+                return json.load(handle).get("services", {}).get(unit, {})
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
     def project_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
         project = self.project_by_id(group_id, project_id)
         if not project:
@@ -122,8 +130,16 @@ class TelegramBotPanel:
             icon, status = short_status(container)
             state = container.attrs.get("State", {})
             lines.append(f"{icon} <code>{esc(name[:25]):25} {status:11} {uptime(state.get('StartedAt'))}</code>")
+        services = project.get("services") or []
+        if services:
+            lines.extend(["", "<b>Systemd services</b>"])
+            for service in services:
+                status = self.systemd_status(service["unit"]).get("active_state", "unknown")
+                icon = "🟢" if status == "active" else "🔴"
+                lines.append(f"{icon} <code>{esc(service['name'][:25]):25} {esc(status.upper())}</code>")
         lines.append(f"\n<b>Containers:</b> {len(project.get('containers', []))}")
         buttons = [[{"text": f"🔎 {name[:24]}", "callback_data": f"container:{group_id}:{project_id}:{index}"}] for index, name in enumerate(project.get("containers", []))]
+        buttons.extend([[{"text": f"⚙️ {service['name'][:24]}", "callback_data": f"service:{group_id}:{project_id}:{index}"}] for index, service in enumerate(services)])
         buttons.append([{"text": "⬅️ Projects", "callback_data": f"group:{group_id}"}])
         return "\n".join(lines), buttons
 
@@ -154,6 +170,23 @@ class TelegramBotPanel:
                     f"<b>Exit code:</b> {state.get('ExitCode', 'unknown')}\n\n"
                     f"<b>Recent logs</b>\n<pre>{logs}</pre>")
         return text, [[{"text": "🔄 Refresh", "callback_data": f"container:{group_id}:{project_id}:{index}"}],
+                      [{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}]]
+
+    def service_page(self, group_id: str, project_id: str, index: int) -> tuple[str, list[list[dict[str, str]]]]:
+        project = self.project_by_id(group_id, project_id)
+        services = project.get("services", []) if project else []
+        if not project or index < 0 or index >= len(services):
+            return "<b>Service not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        service = services[index]
+        details = self.systemd_status(service["unit"])
+        status = details.get("active_state", "unknown")
+        logs = details.get("recent_logs", "No recent journal logs.")
+        icon = "🟢" if status == "active" else "🔴"
+        text = (f"{icon} <b>{esc(service['name'])}</b>\n\n"
+                f"<b>Unit:</b> <code>{esc(service['unit'])}</code>\n"
+                f"<b>Status:</b> {esc(status.upper())}\n\n"
+                f"<b>Recent journal</b>\n<pre>{esc(logs)}</pre>")
+        return text, [[{"text": "🔄 Refresh", "callback_data": f"service:{group_id}:{project_id}:{index}"}],
                       [{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}]]
 
     def handle(self, update: dict[str, Any]) -> None:
@@ -187,6 +220,9 @@ class TelegramBotPanel:
         elif data.startswith("container:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.container_page(group_id, project_id, int(index))
+        elif data.startswith("service:"):
+            _, group_id, project_id, index = data.split(":", 3)
+            text, keyboard = self.service_page(group_id, project_id, int(index))
         else:
             return
         if message_id:

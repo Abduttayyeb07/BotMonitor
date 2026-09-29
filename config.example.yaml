@@ -1,5 +1,6 @@
 poll_interval_seconds: 30
 database_path: /data/incidents.db
+systemd_status_path: /data/systemd-status.json
 
 thresholds:
   disk_warning_percent: 80
@@ -304,11 +305,26 @@ projects:
         compose_file: /root/saad/sheetszahoor/docker-compose.yml
         containers:
           - sheets-sync
+      - id: system-services
+        name: System Services
+        services:
+          - name: wallet-watchman
+            unit: wallet-watchman.service
+          - name: zigchain-exporter
+            unit: zigchain-exporter.service
 
 systemd:
-  # Host systemd is outside the Docker container boundary.
-  enabled: false
-  services: []
+  # Status is supplied by the safe host-side collector.
+  enabled: true
+  services:
+    - name: wallet-watchman
+      project: wallet-monitor
+      unit: wallet-watchman.service
+      critical: true
+    - name: zigchain-exporter
+      project: zigchain-exporter
+      unit: zigchain-exporter.service
+      critical: true
 
 heartbeats: []
 
