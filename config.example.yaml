@@ -198,6 +198,8 @@ docker:
     - name: zigchain-monitor
       project: stakeunstake
       critical: true
+      ignore_log_patterns:
+        - "eth-rpc.*failed over to"
     - name: mdf-tracker
       project: launches
       critical: true
