@@ -138,6 +138,50 @@ class TelegramBotPanel:
             return [buttons[:2], buttons[2:]]
         return [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
 
+    def group_page(self, group_id: str) -> tuple[str, list[list[dict[str, str]]]]:
+        group = self.projects.get(group_id, {})
+        service_only = group.get("items") and all((item.get("services") and not item.get("containers")) for item in group["items"])
+        label = "service" if service_only else "project"
+        return f"{group.get('icon', '📁')} <b>{esc(group.get('title', group_id))}</b>\n\nChoose a {label}:", self.project_keyboard(group_id)
+
+    def command_help(self) -> str:
+        return ("🤖 <b>Central Bot Monitor Commands</b>\n\n"
+                "/start or /menu — main dashboard\n"
+                "/status — current monitoring overview\n"
+                "/frontend — frontend projects\n"
+                "/docker or /bots — Docker bot projects\n"
+                "/services — system services\n"
+                "/incidents — active incidents\n"
+                "/help — show this help")
+
+    def active_incidents_text(self) -> str:
+        try:
+            with sqlite3.connect("/data/incidents.db") as database:
+                rows = database.execute(
+                    "SELECT project, service, incident_type, severity, first_seen, occurrences "
+                    "FROM incidents WHERE status='OPEN' ORDER BY first_seen DESC LIMIT 20"
+                ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        if not rows:
+            return "✅ <b>Active Incidents</b>\n\nNo active incidents."
+        lines = ["🚨 <b>Active Incidents</b>", ""]
+        for project, service, incident_type, severity, first_seen, occurrences in rows:
+            lines.append(f"🔴 <b>{esc(project)}</b> / <code>{esc(service)}</code>\n"
+                         f"   {esc(incident_type.replace('_', ' ').title())} · {esc(severity)} · {occurrences} occurrence(s)")
+        return "\n\n".join(lines)
+
+    def register_commands(self) -> None:
+        self.api("setMyCommands", {"commands": [
+            {"command": "start", "description": "Open monitoring dashboard"},
+            {"command": "status", "description": "Show current overview"},
+            {"command": "frontend", "description": "Show frontend projects"},
+            {"command": "docker", "description": "Show Docker bot projects"},
+            {"command": "services", "description": "Show system services"},
+            {"command": "incidents", "description": "Show active incidents"},
+            {"command": "help", "description": "Show available commands"},
+        ]}, timeout=15)
+
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:
         group = self.projects.get(group_id, {})
         service_only = group.get("items") and all((item.get("services") and not item.get("containers")) for item in group["items"])
@@ -365,6 +409,19 @@ class TelegramBotPanel:
             command = (message.get("text") or "").split()[0].lower()
             if command in {"/start", "/menu", "/status"}:
                 self.send(chat_id, self.overview_text(), self.group_keyboard())
+            elif command in {"/frontend"}:
+                text, keyboard = self.group_page("frontend")
+                self.send(chat_id, text, keyboard)
+            elif command in {"/docker", "/bots"}:
+                text, keyboard = self.group_page("bots_docker")
+                self.send(chat_id, text, keyboard)
+            elif command in {"/services"}:
+                text, keyboard = self.group_page("bots_systemd")
+                self.send(chat_id, text, keyboard)
+            elif command == "/incidents":
+                self.send(chat_id, self.active_incidents_text())
+            elif command == "/help":
+                self.send(chat_id, self.command_help())
             return
         if not callback:
             return
@@ -404,6 +461,7 @@ class TelegramBotPanel:
             log.warning("Telegram panel disabled: token or authorized chat IDs are missing")
             return
         log.info("Telegram panel started: groups=%s, authorized_chats=%s", len(self.projects), len(self.allowed_chat_ids))
+        self.register_commands()
         while not self.stop_event.is_set():
             response = self.api("getUpdates", {"offset": self.offset, "timeout": 25, "allowed_updates": ["message", "callback_query"]}, timeout=35)
             if not response:
