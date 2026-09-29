@@ -210,8 +210,8 @@ projects:
           - zig_backend
           - zig_bot
           - zig_postgres
-  bots:
-    title: Bots
+  bots_docker:
+    title: Bots (Docker)
     items:
       - id: marketzig
         name: Zig Whale Bot
@@ -305,6 +305,9 @@ projects:
         compose_file: /root/saad/sheetszahoor/docker-compose.yml
         containers:
           - sheets-sync
+  bots_systemd:
+    title: Bots (System Service)
+    items:
       - id: system-services
         name: System Services
         services:

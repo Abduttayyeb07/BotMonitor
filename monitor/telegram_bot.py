@@ -90,8 +90,7 @@ class TelegramBotPanel:
         buttons = []
         for group_id, group in self.projects.items():
             buttons.append({"text": f"📁 {group.get('title', group_id)}", "callback_data": f"group:{group_id}"})
-        rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
-        return rows
+        return [buttons]
 
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:
         group = self.projects.get(group_id, {})
