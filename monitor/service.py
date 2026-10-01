@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 import html
+import json
 import os
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -45,7 +47,7 @@ def issue_text(incident: dict) -> str:
             return f"Docker reported the container health status as unhealthy. Health output: {detail[1].strip()}"
         return "Docker reported the container health status as unhealthy."
     messages = {
-        "PROJECT_DOWN": "All containers in this project are down.",
+        "PROJECT_DOWN": incident['message'],
         "CONTAINER_DOWN": "Docker reported that the container is down.",
         "SYSTEMD_DOWN": "systemd reported that the service is not active.",
         "HIGH_MEMORY": "Host memory usage exceeded the configured threshold.",
@@ -83,21 +85,41 @@ def collapse_project_failures(findings: list[dict], config: dict) -> list[dict]:
     collapsed: set[tuple[str, str]] = set()
     for project, names in by_project.items():
         down = {finding["service"] for finding in findings
-                if finding["project"] == project and finding["type"] == "CONTAINER_DOWN"}
+                if finding["project"] == project and finding["type"] in {'CONTAINER_DOWN', 'CONTAINER_UNHEALTHY'}}
         if len(names) > 1 and names.issubset(down):
             collapsed.add((project, "CONTAINER_DOWN"))
+            collapsed.add((project, 'CONTAINER_UNHEALTHY'))
             result.append({
                 "project": project,
                 "service": f"{project}-project",
                 "type": "PROJECT_DOWN",
                 "severity": "CRITICAL",
-                "message": f"All {len(names)} containers in the project are down: {', '.join(sorted(names))}",
+                "message": f"All {len(names)} configured containers are stopped, missing, or unhealthy: {', '.join(sorted(names))}",
             })
     for finding in findings:
-        if (finding["project"], finding["type"]) in collapsed and finding["type"] == "CONTAINER_DOWN":
+        if (finding["project"], finding["type"]) in collapsed:
             continue
         result.append(finding)
     return result
+
+
+class OutageWindow:
+    """Allow a short window for a stack shutdown to settle before notifying."""
+    def __init__(self):
+        self.pending = {}
+
+    def apply(self, findings, config):
+        now = time.monotonic()
+        delay = config.get('project_correlation_seconds', 10)
+        projects = {item['project'] for item in findings if item['type'] == 'CONTAINER_DOWN'}
+        self.pending = {project: stamp for project, stamp in self.pending.items() if project in projects}
+        held = set()
+        for project in projects:
+            stamp = self.pending.setdefault(project, now)
+            if now - stamp < delay:
+                held.add(project)
+        protected = {item['service'] for item in findings if item['project'] in held}
+        return [item for item in findings if not (item['project'] in held and item['type'] == 'CONTAINER_DOWN')], protected
 
 
 def main() -> None:
@@ -112,14 +134,14 @@ def main() -> None:
                                 chat_ids,
                                 telegram_config.get("enabled", True))
     panel = TelegramBotPanel(env(telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")), chat_ids,
-                             config.get("projects", {}), config.get("allow_container_restart", False))
+                             config.get("projects", {}), config.get("allow_container_restart", False), config.get('database_path', 'data/incidents.db'))
     running = True
     def stop(_signum, _frame):
         nonlocal running
         running = False
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    interval = int(config.get("poll_interval_seconds", 30))
+    interval = max(1, int(config.get("poll_interval_seconds", 5)))
     configured_containers = len(config.get("docker", {}).get("containers") or [])
     configured_systemd = len(config.get("systemd", {}).get("services") or [])
     log.info("central monitor started: poll_interval=%ss, docker_containers=%s, systemd_services=%s, telegram_chats=%s",
@@ -134,7 +156,9 @@ def main() -> None:
     log_cursors: dict[str, int] = {}
     poll_number = 0
     summary_every = max(1, int(config.get("summary_interval_seconds", 300) / max(interval, 1)))
+    outage_window = OutageWindow()
     while running:
+        cycle_started = time.monotonic()
         poll_number += 1
         active = []
         findings = host_checks(config.get("thresholds", {}))
@@ -143,6 +167,21 @@ def main() -> None:
         findings += systemd_checks(config.get("systemd", {}), config.get("systemd_status_path", "/data/systemd-status.json"))
         findings += endpoint_checks(config.get("docker", {}).get("containers") or [])
         findings = collapse_project_failures(findings, config)
+        # A project outage resolves only when all its members are healthy.
+        protected = set()
+        grouped_active = set()
+        for row in store.db.execute("SELECT project, service FROM incidents WHERE status='OPEN' AND incident_type='PROJECT_DOWN'"):
+            if any(item['project'] == row['project'] for item in findings):
+                protected.add(row['service'])
+                grouped_active.add(row['project'])
+        findings = [item for item in findings if not (item['project'] in grouped_active and item['type'] in {'CONTAINER_DOWN', 'CONTAINER_UNHEALTHY'})]
+        findings, held = outage_window.apply(findings, config)
+        protected.update(held)
+        # Never resolve container outages while Docker itself cannot be read.
+        if any(item['type'] == 'DOCKER_UNAVAILABLE' for item in findings):
+            protected.update(item['name'] for item in config.get('docker', {}).get('containers', []))
+            protected.update(row[0] for row in store.db.execute("SELECT service FROM incidents WHERE status='OPEN' AND incident_type='PROJECT_DOWN'"))
+        notifications = []
         cooldowns = config.get("cooldowns", {})
         for finding in findings:
             key = fingerprint(finding["project"], finding["service"], finding["type"], finding["message"])
@@ -150,13 +189,31 @@ def main() -> None:
             cooldown = cooldowns.get("critical_seconds", 300) if finding["severity"] == "CRITICAL" else cooldowns.get("default_seconds", 900)
             incident, should_alert = store.observe(key, finding["project"], finding["service"], finding["type"], finding["severity"], finding["message"], int(cooldown))
             if should_alert:
-                notifier.send(message_for("🚨 INCIDENT OPEN / STILL ACTIVE", incident))
-        for incident in store.recover_stale(set(active)):
-            notifier.send(message_for("✅ INCIDENT RECOVERED", incident))
+                notifications.append((key, message_for("🚨 INCIDENT OPEN / STILL ACTIVE", incident)))
+                log.warning('incident active: project=%s service=%s type=%s', finding['project'], finding['service'], finding['type'])
+        project_down = {item['project'] for item in findings if item['type'] == 'PROJECT_DOWN'}
+        for incident in store.recover_stale(set(active), protected):
+            # Grouped container findings are superseded, not recovered.
+            if incident['project'] in project_down:
+                continue
+            store.db.execute('INSERT OR REPLACE INTO recovery_queue VALUES (?, ?)', (incident['fingerprint'], json.dumps(incident)))
+            log.info('incident recovered: project=%s service=%s', incident['project'], incident['service'])
+        store.db.commit()
+        for row in store.db.execute('SELECT fingerprint, payload FROM recovery_queue'):
+            notifications.append(('recovery:' + row[0], message_for('✅ INCIDENT RECOVERED', json.loads(row[1]))))
+        with ThreadPoolExecutor(max_workers=4) as delivery_pool:
+            jobs = [(key, delivery_pool.submit(notifier.send, message)) for key, message in notifications]
+            for key, job in jobs:
+                if job.result() and key:
+                    if key.startswith('recovery:'):
+                        store.db.execute('DELETE FROM recovery_queue WHERE fingerprint=?', (key.split(':', 1)[1],))
+                        store.db.commit()
+                    else:
+                        store.mark_alert_sent(key)
         if poll_number == 1 or poll_number % summary_every == 0:
             summary = docker_snapshot(config.get("docker", {}))
             active_count = store.db.execute("SELECT COUNT(*) FROM incidents WHERE status='OPEN'").fetchone()[0]
             log.info("monitoring summary: running=%s healthy=%s unhealthy=%s stopped=%s missing=%s active_incidents=%s findings_this_poll=%s",
                      summary["running"], summary["healthy"], summary["unhealthy"], summary["stopped"], summary["missing"], active_count, len(findings))
-        time.sleep(interval)
+        time.sleep(max(0, interval - (time.monotonic() - cycle_started)))
     panel.stop()

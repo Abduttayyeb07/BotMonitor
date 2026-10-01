@@ -74,3 +74,21 @@ TELEGRAM_CHAT_IDS=123456789,-1001234567890
 ```
 
 Never commit `config.yaml`, `.env`, tokens, or credentials.
+
+## Outage detection
+
+Configured containers that are removed (including `docker compose down`) count
+as unavailable. Project membership comes from `projects.*.items[].containers`,
+so the dashboard and alert grouping share the same inventory. A complete outage
+produces one project incident, including stacks with stopped applications and an
+unhealthy database. A partial shutdown waits `project_correlation_seconds` before
+sending container alerts. An active project outage stays open during partial recovery.
+
+The example polls every 5 seconds and uses a 10-second grouping window. Copy
+these settings into your active `config.yaml` to use them. Very short outages
+between polls can still be missed; this version uses polling, not Docker events.
+Telegram lookups share a short-lived Docker inventory cache. Incident opens are
+acknowledged after successful delivery; failed deliveries are retried. Recovery
+notifications are queued in SQLite and retried after monitor restarts.
+
+Regression checks: `python -m unittest discover -s tests -v`.

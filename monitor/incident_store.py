@@ -25,6 +25,8 @@ def normalize(message: str) -> str:
 
 
 def fingerprint(project: str, service: str, incident_type: str, message: str) -> str:
+    if incident_type in {'CONTAINER_DOWN', 'CONTAINER_UNHEALTHY', 'PROJECT_DOWN', 'SYSTEMD_DOWN'}:
+        message = incident_type
     raw = "|".join((project, service, incident_type, normalize(message)))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
@@ -42,6 +44,7 @@ class IncidentStore:
               status TEXT NOT NULL, last_alert_at TEXT, resolved_at TEXT
             )
         """)
+        self.db.execute('CREATE TABLE IF NOT EXISTS recovery_queue (fingerprint TEXT PRIMARY KEY, payload TEXT NOT NULL)')
         self.db.commit()
 
     def observe(self, key: str, project: str, service: str, incident_type: str,
@@ -52,31 +55,36 @@ class IncidentStore:
             stamp = current.isoformat()
             self.db.execute("INSERT INTO incidents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (key, project, service, incident_type, severity, message, stamp,
-                              stamp, 1, "OPEN", stamp, None))
+                              stamp, 1, "OPEN", None, None))
             self.db.commit()
             return dict(self.db.execute("SELECT * FROM incidents WHERE fingerprint = ?", (key,)).fetchone()), True
 
         # One notification per incident lifecycle. Repeated observations stay
         # active silently until recovery, preventing reminder spam.
-        should_alert = row["status"] == "RECOVERED"
+        should_alert = row["status"] == "RECOVERED" or row['last_alert_at'] is None
         self.db.execute("""UPDATE incidents SET last_seen=?, occurrences=occurrences+1,
                            status='OPEN', message=?, resolved_at=NULL,
-                           last_alert_at=CASE WHEN ? THEN ? ELSE last_alert_at END
+                           last_alert_at=CASE WHEN ? THEN NULL ELSE last_alert_at END
                            WHERE fingerprint=?""",
-                        (current.isoformat(), message, int(should_alert), current.isoformat(), key))
+                        (current.isoformat(), message, int(row['status'] == 'RECOVERED'), key))
         self.db.commit()
         return dict(self.db.execute("SELECT * FROM incidents WHERE fingerprint = ?", (key,)).fetchone()), should_alert
 
-    def recover_stale(self, active_keys: set[str]) -> list[dict[str, Any]]:
+    def mark_alert_sent(self, key: str) -> None:
+        self.db.execute('UPDATE incidents SET last_alert_at=? WHERE fingerprint=?', (now(), key))
+        self.db.commit()
+
+    def recover_stale(self, active_keys: set[str], protected_services: set[str] | None = None) -> list[dict[str, Any]]:
         rows = self.db.execute("SELECT * FROM incidents WHERE status='OPEN'").fetchall()
         recovered = []
         for row in rows:
-            if row["fingerprint"] not in active_keys:
+            if row["fingerprint"] not in active_keys and row['service'] not in (protected_services or set()):
                 stamp = now()
                 self.db.execute("UPDATE incidents SET status='RECOVERED', resolved_at=? WHERE fingerprint=?",
                                  (stamp, row["fingerprint"]))
                 recovered_row = dict(row)
                 recovered_row["resolved_at"] = stamp
+                recovered_row['status'] = 'RECOVERED'
                 recovered.append(recovered_row)
         if recovered:
             self.db.commit()

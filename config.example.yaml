@@ -1,4 +1,5 @@
-poll_interval_seconds: 30
+poll_interval_seconds: 5
+project_correlation_seconds: 10
 summary_interval_seconds: 300
 database_path: /data/incidents.db
 systemd_status_path: /data/systemd-status.json

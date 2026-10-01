@@ -3,11 +3,27 @@ from __future__ import annotations
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import docker
 
 log = logging.getLogger(__name__)
+
+
+def inventory() -> dict[str, Any]:
+    """Inspect containers concurrently; fail the whole snapshot on API errors."""
+    with docker.from_env(timeout=5) as client:
+        containers = client.containers.list(all=True, sparse=True)
+        def reload(container):
+            try:
+                container.reload()
+            except docker.errors.NotFound:
+                return None
+            return container
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            inspected = list(pool.map(reload, containers))
+        return {container.name: container for container in inspected if container is not None}
 
 DEFAULT_ERROR_PATTERNS = (
     r"\btraceback\b", r"\b(fatal|critical|panic|exception)\b",
@@ -88,12 +104,14 @@ def checks(config: dict[str, Any]) -> list[dict[str, str]]:
     if not config.get("enabled", True):
         return findings
     try:
-        client = docker.from_env()
         configured = {item["name"]: item for item in (config.get("containers") or [])}
-        containers = client.containers.list(all=True)
-        for container in containers:
-            item = configured.get(container.name)
-            if item is None:
+        containers = inventory()
+        for name, item in configured.items():
+            project = item.get('project', name)
+            severity = 'CRITICAL' if item.get('critical', True) else 'ERROR'
+            container = containers.get(name)
+            if container is None:
+                findings.append({'project': project, 'service': name, 'type': 'CONTAINER_DOWN', 'severity': severity, 'message': 'Configured container is missing or removed'})
                 continue
             attrs = container.attrs
             state = attrs.get("State", {})
@@ -104,7 +122,7 @@ def checks(config: dict[str, Any]) -> list[dict[str, str]]:
                 findings.append({"project": project, "service": container.name, "type": "CONTAINER_DOWN", "severity": severity, "message": f"Container state is {status}; exit code={state.get('ExitCode')}"})
                 continue
             health = state.get("Health", {}).get("Status")
-            if health in {"unhealthy", "starting"}:
+            if health == "unhealthy":
                 health_log = state.get("Health", {}).get("Log", [])
                 output = health_log[-1].get("Output", "").strip() if health_log else ""
                 detail = f"; health-check output: {output[-1200:]}" if output else ""
@@ -122,7 +140,7 @@ def snapshot(config: dict[str, Any]) -> dict[str, int]:
     if not config.get("enabled", True):
         return result
     try:
-        containers = {container.name: container for container in docker.from_env().containers.list(all=True)}
+        containers = inventory()
         for name in configured:
             container = containers.get(name)
             if container is None:

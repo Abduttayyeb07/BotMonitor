@@ -9,9 +9,11 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
+from contextlib import closing
 
 import docker
 import requests
+from .docker_checks import inventory
 
 log = logging.getLogger(__name__)
 
@@ -52,11 +54,14 @@ def uptime(started_at: str | None) -> str:
 
 
 class TelegramBotPanel:
-    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False):
+    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False, database_path: str = '/data/incidents.db'):
         self.token = token
         self.allowed_chat_ids = set(allowed_chat_ids)
         self.projects = projects or {}
         self.allow_restart = allow_restart
+        self.database_path = database_path
+        self.inventory_cache = {}
+        self.inventory_at = 0.0
         self.stop_event = threading.Event()
         self.offset = 0
         self.api_url = f"https://api.telegram.org/bot{token}" if token else ""
@@ -75,7 +80,7 @@ class TelegramBotPanel:
             elif container.attrs.get("State", {}).get("Health", {}).get("Status") == "unhealthy":
                 unhealthy += 1
         try:
-            with sqlite3.connect("/data/incidents.db") as database:
+            with closing(sqlite3.connect(self.database_path)) as database:
                 active_incidents = database.execute("SELECT COUNT(*) FROM incidents WHERE status='OPEN'").fetchone()[0]
         except (sqlite3.Error, OSError):
             active_incidents = "unknown"
@@ -156,7 +161,7 @@ class TelegramBotPanel:
 
     def active_incidents_text(self) -> str:
         try:
-            with sqlite3.connect("/data/incidents.db") as database:
+            with closing(sqlite3.connect(self.database_path)) as database:
                 rows = database.execute(
                     "SELECT project, service, incident_type, severity, first_seen, occurrences "
                     "FROM incidents WHERE status='OPEN' ORDER BY first_seen DESC LIMIT 20"
@@ -206,8 +211,12 @@ class TelegramBotPanel:
 
     def container(self, name: str) -> Any | None:
         try:
-            return docker.from_env().containers.get(name)
+            if time.monotonic() - self.inventory_at > 2:
+                self.inventory_cache = inventory()
+                self.inventory_at = time.monotonic()
+            return self.inventory_cache.get(name)
         except Exception:
+            log.error('Telegram container inventory unavailable')
             return None
 
     def systemd_status(self, unit: str) -> dict[str, Any]:
@@ -217,12 +226,16 @@ class TelegramBotPanel:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
 
-    def incident_history(self, project_name: str) -> tuple[int, int, int]:
+    def incident_history(self, project_name: str, services: list[str] | None = None) -> tuple[int, int, int]:
         try:
-            with sqlite3.connect("/data/incidents.db") as database:
+            services = services or []
+            clause = 'project=?'
+            if services:
+                clause += ' OR service IN (' + ','.join('?' for _ in services) + ')'
+            with closing(sqlite3.connect(self.database_path)) as database:
                 total, active, recovered = database.execute(
-                    "SELECT COUNT(*), SUM(status='OPEN'), SUM(status='RECOVERED') FROM incidents WHERE project=?",
-                    (project_name,),
+                    "SELECT COUNT(*), SUM(status='OPEN'), SUM(status='RECOVERED') FROM incidents WHERE " + clause,
+                    (project_name, *services),
                 ).fetchone()
                 return total or 0, active or 0, recovered or 0
         except (sqlite3.Error, OSError):
@@ -264,7 +277,7 @@ class TelegramBotPanel:
                 f"{icon} <b>{esc(name)}</b>\n"
                 f"   <i>{esc(status.title())}  •  Uptime {uptime(state.get('StartedAt'))}  •  Restarts {container.attrs.get('RestartCount', 0)}</i>"
             )
-        total, active, recovered = self.incident_history(project.get("name", project_id))
+        total, active, recovered = self.incident_history(project_id, containers)
         lines = [
             f"📊 <b>{esc(project['name'])}</b>",
             f"{self.health_bar(len(containers), running, unhealthy)}  <b>{running}/{len(containers)} running</b>",
@@ -406,7 +419,8 @@ class TelegramBotPanel:
             log.warning("Ignoring Telegram update from unauthorized chat %s", chat_id)
             return
         if message:
-            command = (message.get("text") or "").split()[0].lower()
+            words = (message.get('text') or '').split()
+            command = words[0].lower().split('@')[0] if words else ''
             if command in {"/start", "/menu", "/status"}:
                 self.send(chat_id, self.overview_text(), self.group_keyboard())
             elif command in {"/frontend"}:
