@@ -2,16 +2,31 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from monitor.config import load_config
-from monitor.docker_checks import checks
+from monitor.docker_checks import checks, inventory
 from monitor.incident_store import IncidentStore, fingerprint
 from monitor.service import collapse_project_failures, OutageWindow
 from monitor.telegram_bot import TelegramBotPanel
 
 
 class MonitoringRegressionTests(unittest.TestCase):
+    def test_inventory_closes_client_without_context_manager_support(self):
+        container = SimpleNamespace(name='a', reload=Mock())
+        client = SimpleNamespace(containers=SimpleNamespace(list=Mock(return_value=[container])), close=Mock())
+        with patch('monitor.docker_checks.docker.from_env', return_value=client):
+            self.assertEqual(inventory(), {'a': container})
+        container.reload.assert_called_once_with()
+        client.close.assert_called_once_with()
+
+    def test_inventory_closes_client_on_api_failure(self):
+        client = SimpleNamespace(containers=SimpleNamespace(list=Mock(side_effect=RuntimeError('API unavailable'))), close=Mock())
+        with patch('monitor.docker_checks.docker.from_env', return_value=client):
+            with self.assertRaisesRegex(RuntimeError, 'API unavailable'):
+                inventory()
+        client.close.assert_called_once_with()
+
     def test_removed_container_is_down(self):
         with patch('monitor.docker_checks.inventory', return_value={}):
             findings = checks({'containers': [{'name': 'zigchain-wallet-monitor', 'project': 'nawavaldora'}]})

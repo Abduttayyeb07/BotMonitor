@@ -13,7 +13,8 @@ log = logging.getLogger(__name__)
 
 def inventory() -> dict[str, Any]:
     """Inspect containers concurrently; fail the whole snapshot on API errors."""
-    with docker.from_env(timeout=5) as client:
+    client = docker.from_env(timeout=5)
+    try:
         containers = client.containers.list(all=True, sparse=True)
         def reload(container):
             try:
@@ -24,6 +25,8 @@ def inventory() -> dict[str, Any]:
         with ThreadPoolExecutor(max_workers=8) as pool:
             inspected = list(pool.map(reload, containers))
         return {container.name: container for container in inspected if container is not None}
+    finally:
+        client.close()
 
 DEFAULT_ERROR_PATTERNS = (
     r"\btraceback\b", r"\b(fatal|critical|panic|exception)\b",
