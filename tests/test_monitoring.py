@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from monitor.config import load_config
 from monitor.docker_checks import checks, inventory
 from monitor.incident_store import IncidentStore, fingerprint
-from monitor.reports import frontend_report_message, should_send_daily_report
+from monitor.reports import frontend_report_items, frontend_report_message, should_send_daily_report
 from monitor.service import collapse_project_failures, OutageWindow
 from monitor.telegram_bot import TelegramBotPanel
 from datetime import datetime
@@ -131,6 +131,14 @@ class MonitoringRegressionTests(unittest.TestCase):
         ]), patch.object(panel, 'send') as send:
             panel.handle({'message': {'chat': {'id': 1}, 'text': '/frontendhealth'}})
         self.assertIn('Daily Frontend Report', send.call_args.args[1])
+
+    def test_frontend_report_items_fill_known_urls_from_project_list(self):
+        items = frontend_report_items({}, {'frontend': {'items': [
+            {'id': 'beencointernalcomms', 'name': 'Beencointernalcomms'},
+            {'id': 'zigexchange', 'name': 'ZigExchange'},
+        ]}})
+        self.assertEqual(items[0]['health_url'], 'http://host.docker.internal:4173/health')
+        self.assertEqual(items[1]['health_url'], 'http://host.docker.internal:4090/')
 
 
 if __name__ == '__main__':

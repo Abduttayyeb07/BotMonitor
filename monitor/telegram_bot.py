@@ -14,7 +14,7 @@ from contextlib import closing
 import docker
 import requests
 from .docker_checks import inventory
-from .reports import frontend_endpoint_results, frontend_report_message
+from .reports import frontend_endpoint_results, frontend_report_items, frontend_report_message
 
 log = logging.getLogger(__name__)
 
@@ -192,7 +192,7 @@ class TelegramBotPanel:
         ]}, timeout=15)
 
     def frontend_health_report_text(self) -> str:
-        items = self.frontend_report_config.get("items") or self.projects.get("frontend", {}).get("items", [])
+        items = frontend_report_items(self.frontend_report_config, self.projects)
         return frontend_report_message(frontend_endpoint_results(items))
 
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:

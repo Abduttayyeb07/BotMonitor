@@ -13,6 +13,34 @@ log = logging.getLogger(__name__)
 
 PKT = ZoneInfo("Asia/Karachi")
 
+DEFAULT_FRONTEND_REPORT_ITEMS = [
+    {"id": "beencointernalcomms", "name": "Beenco Internal Comms", "health_url": "http://host.docker.internal:4173/health"},
+    {"id": "beencomindshub", "name": "Beencomindshub", "health_url": "http://host.docker.internal:3000/health"},
+    {"id": "liquidity-provider", "name": "Liquidity Provider", "health_url": "http://host.docker.internal:5173/health"},
+    {"id": "vault-automator", "name": "VaultAutomator", "health_url": "http://host.docker.internal:4560/"},
+    {"id": "ethzigliquid", "name": "EthZigLiquid", "health_url": "http://host.docker.internal:18300/"},
+    {"id": "arkive", "name": "Arkive", "health_url": "http://host.docker.internal:8043/health"},
+    {"id": "zigexchange", "name": "ZigExchange", "health_url": "http://host.docker.internal:4090/"},
+]
+
+
+def frontend_report_items(config: dict[str, Any], projects: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    configured = config.get("items") or []
+    if configured and all(item.get("health_url") for item in configured):
+        return configured
+
+    by_id = {item["id"]: item for item in DEFAULT_FRONTEND_REPORT_ITEMS}
+    by_name = {item["name"].lower(): item for item in DEFAULT_FRONTEND_REPORT_ITEMS}
+    resolved = []
+    for item in configured or (projects or {}).get("frontend", {}).get("items", []):
+        default = by_id.get(item.get("id")) or by_name.get(str(item.get("name", "")).lower())
+        if default:
+            resolved.append({**default, **{key: value for key, value in item.items() if key != "health_url"}})
+        elif item.get("health_url"):
+            resolved.append(item)
+
+    return resolved or DEFAULT_FRONTEND_REPORT_ITEMS
+
 
 def frontend_endpoint_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     results = []
