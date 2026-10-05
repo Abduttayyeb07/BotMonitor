@@ -62,16 +62,6 @@ def systemd_checks(config: dict[str, Any], status_path: str = "/data/systemd-sta
             continue
         if unit == "wallet-watchman.service":
             activity = current.get("activity") or {}
-            last_reload = activity.get("last_reload_at")
-            try:
-                stamp = datetime.fromisoformat(last_reload)
-                age = (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds()
-            except (TypeError, ValueError):
-                age = float("inf")
-            if age > int(item.get("reload_timeout_seconds", 900)) or not activity.get("wallet_count"):
-                findings.append({"project": item.get("project", item["name"]), "service": item["name"],
-                                 "type": "SYSTEMD_ACTIVITY_STALE", "severity": "ERROR",
-                                 "message": "Wallet Watchman has no recent successful DB wallet reload"})
             failures = int(activity.get("rpc_failures_10m") or 0)
             if failures >= int(item.get("rpc_failure_threshold", 3)):
                 findings.append({"project": item.get("project", item["name"]), "service": item["name"],

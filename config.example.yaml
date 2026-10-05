@@ -56,7 +56,7 @@ bot_reports:
   wallet_monitor:
     container: wallet-monitor
     log_tail_lines: 500
-    stale_after_seconds: 3600
+    telegram_error_threshold: 3
   zigchain_bot:
     container: zigchain-bot
     log_tail_lines: 500
@@ -74,7 +74,7 @@ bot_reports:
   mdf_tracker:
     container: mdf-tracker
     log_tail_lines: 500
-    stale_after_seconds: 3600
+    telegram_error_threshold: 3
     markers:
       - "[TG] Telegram bot started"
       - "[WS] Connected"
@@ -83,11 +83,9 @@ bot_reports:
   highbuy_monitor:
     container: highbuy-monitor
     log_tail_lines: 500
-    stale_after_seconds: 3600
+    error_threshold: 3
   nawa_valdora:
     container: zigchain-wallet-monitor
-    log_tail_lines: 1000
-    stale_after_seconds: 300
     max_block_gap: 20
   tokenx_vault:
     container: bsc-and-eth-token-monitor
@@ -98,12 +96,12 @@ bot_reports:
   bep20_usdt:
     container: bep20-usdt-telegram-monitor
     log_tail_lines: 1000
-    stale_after_seconds: 7200
+    live_scan_stale_seconds: 300
     max_backlog_blocks: 500
   eth_usdt:
     container: eth-usdt-telegram-monitor
     log_tail_lines: 1000
-    stale_after_seconds: 7200
+    live_scan_stale_seconds: 300
     max_backlog_blocks: 500
   sheets_sync:
     container: sheets-sync
@@ -113,7 +111,6 @@ bot_reports:
   system_services:
     status_path: /data/systemd-status.json
     collector_max_age_seconds: 60
-    reload_timeout_seconds: 900
     rpc_failure_threshold: 3
 
 thresholds:
@@ -520,7 +517,6 @@ systemd:
       project: wallet-monitor
       unit: wallet-watchman.service
       critical: true
-      reload_timeout_seconds: 900
       rpc_failure_threshold: 3
     - name: zigchain-exporter
       project: zigchain-exporter

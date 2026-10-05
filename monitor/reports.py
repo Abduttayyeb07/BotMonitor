@@ -42,6 +42,7 @@ DEFAULT_USDT_RPCS = {
     DEFAULT_ETH_USDT_CONTAINER: "https://ethereum-rpc.publicnode.com",
 }
 ZIGCHAIN_RPCS = (
+    ("Internal RPC", "http://internal-bots-rpc.wickhub.cc"),
     ("ZigScan", "https://zigchain-mainnet.zigscan.net"),
     ("CryptoComics", "https://cryptocomics-rpc.wickhub.cc"),
     ("Numia", "https://public-zigchain-rpc.numia.xyz/"),
@@ -51,10 +52,9 @@ BACKFILL_LINE = re.compile(
     r"(?P<start>\d+)-(?P<end>\d+);\s*latest=(?P<latest>\d+);\s*backlog=(?P<backlog>\d+)", re.IGNORECASE
 )
 HTTP_BLOCK_LINE = re.compile(r"Last HTTP block:\s*(\d+)", re.IGNORECASE)
-NAWA_BLOCK_LINE = re.compile(
-    r"(?:processed|processing|current|latest|last|at|new)?\s*block(?:\s+height)?\s*[:=#-]?\s*(\d{6,})\b"
-    r"|\bheight\s*[:=]\s*(\d{6,})\b", re.IGNORECASE
-)
+LIVE_SCAN_LINE = re.compile(r"\bLive scan\s+.+?;\s*latest=(?P<latest>\d+);\s*backlog=(?P<backlog>\d+)\s+block\(s\)", re.IGNORECASE)
+LIVE_SCAN_RESULT = re.compile(r"\bLive scan result:.*?WebSocket decoded total=(?P<decoded>\d+),\s*matched total=\d+,\s*last WS block=(?P<height>\d+)", re.IGNORECASE)
+TATUM_CREDIT_FAILURE = re.compile(r"(?:402 Payment Required|You have used all your credits|account is expired)", re.IGNORECASE)
 
 DEFAULT_FRONTEND_REPORT_ITEMS = [
     {"id": "beencointernalcomms", "name": "Beenco Internal Comms", "health_url": "http://127.0.0.1:4173/health"},
@@ -255,6 +255,30 @@ def _container_logs(container_name: str, tail: int = 500) -> str:
         client.close()
 
 
+def _container_state(container_name: str) -> dict[str, Any]:
+    client = docker.from_env(timeout=5)
+    try:
+        container = client.containers.get(container_name)
+        container.reload()
+        state = container.attrs.get("State") or {}
+        status = state.get("Status", "unknown")
+        health = (state.get("Health") or {}).get("Status")
+        return {"running": status == "running" and health != "unhealthy",
+                "status": status, "health": health}
+    finally:
+        client.close()
+
+
+def _recent_matching_lines(log_text: str, pattern: re.Pattern[str], window_seconds: int = 600) -> list[str]:
+    now = datetime.now(timezone.utc)
+    recent = []
+    for line in log_text.splitlines():
+        stamp = _docker_timestamp(line)
+        if stamp and pattern.search(line) and 0 <= (now - stamp.astimezone(timezone.utc)).total_seconds() <= window_seconds:
+            recent.append(line)
+    return recent
+
+
 def _docker_timestamp(line: str) -> datetime | None:
     first = line.split(maxsplit=1)[0] if line.strip() else ""
     try:
@@ -333,24 +357,26 @@ TELEGRAM_BOT_ERROR = re.compile(r"(polling error|ETELEGRAM|Bad Gateway|Cannot re
 def wallet_monitor_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     container_name = config.get("container", DEFAULT_WALLET_MONITOR_CONTAINER)
+    state = _container_state(container_name)
     logs = _container_logs(container_name, int(config.get("log_tail_lines", 500)))
-    stale_after = int(config.get("stale_after_seconds", 3600))
     ready = any(marker in logs for marker in WALLET_MONITOR_READY)
-    errors = [line for line in logs.splitlines() if WALLET_MONITOR_ERROR.search(line)]
-    latest = parse_log_freshness(logs, "[ws]", stale_after)
-    ok = ready and not errors and latest["ok"]
-    if not ready:
-        error = "Wallet monitor websocket/subscription startup lines were not found"
-    elif errors:
+    errors = _recent_matching_lines(logs, WALLET_MONITOR_ERROR)
+    fatal = any("EFATAL" in line or "AggregateError" in line for line in errors)
+    failing = fatal or len(errors) >= int(config.get("telegram_error_threshold", 3))
+    ok = state["running"] and not failing
+    if not state["running"]:
+        error = f"Container is {state['status']} (health {state['health'] or 'not configured'})"
+    elif failing:
         error = errors[-1].split(maxsplit=1)[-1][-500:]
     else:
-        error = latest["error"]
+        error = ""
     return {
         "name": "Wallet Monitor",
         "container": container_name,
         "ok": ok,
         "ready": ready,
-        "age_seconds": latest.get("age_seconds"),
+        "status": state["status"],
+        "summary": "running; startup confirmed" if ready else "running; startup log outside tail",
         "error_count": len(errors),
         "error": "" if ok else error,
     }
@@ -400,32 +426,31 @@ def stake_unstake_results(config: dict[str, Any] | None = None) -> dict[str, Any
 def mdf_tracker_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     container_name = config.get("container", DEFAULT_MDF_TRACKER_CONTAINER)
+    state = _container_state(container_name)
     logs = _container_logs(container_name, int(config.get("log_tail_lines", 500)))
-    stale_after = int(config.get("stale_after_seconds", 3600))
     markers = config.get("markers") or [
         "[TG] Telegram bot started",
         "[WS] Connected",
         "[WS] Subscribed to MDF create_denom",
         "[WS] Subscribed to CreatePairAndProvideLiquidity",
     ]
-    freshness = parse_any_log_freshness(logs, markers, stale_after)
     ready = all(marker in logs for marker in markers)
-    errors = [line for line in logs.splitlines() if TELEGRAM_BOT_ERROR.search(line)]
-    ok = ready and freshness["ok"] and not errors
-    if not ready:
-        missing = [marker for marker in markers if marker not in logs]
-        error = f"Missing startup/subscription log(s): {', '.join(missing)}"
-    elif errors:
+    errors = _recent_matching_lines(logs, TELEGRAM_BOT_ERROR)
+    failing = len(errors) >= int(config.get("telegram_error_threshold", 3))
+    ok = state["running"] and not failing
+    if not state["running"]:
+        error = f"Container is {state['status']} (health {state['health'] or 'not configured'})"
+    elif failing:
         error = errors[-1].split(maxsplit=1)[-1][-500:]
     else:
-        error = freshness["error"]
+        error = ""
     return {
         "name": "MDF Tracker",
         "container": container_name,
         "ok": ok,
         "ready": ready,
-        "age_seconds": freshness.get("age_seconds"),
-        "marker": freshness.get("marker"),
+        "status": state["status"],
+        "summary": "running; subscriptions logged" if ready else "running; startup log outside tail",
         "error_count": len(errors),
         "error": "" if ok else error,
     }
@@ -437,30 +462,24 @@ HIGHBUY_ERROR = re.compile(r"\b(error|fatal|panic|exception|unhandled|uncaught)\
 def highbuy_monitor_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     container_name = config.get("container", DEFAULT_HIGHBUY_MONITOR_CONTAINER)
+    state = _container_state(container_name)
     logs = _container_logs(container_name, int(config.get("log_tail_lines", 500)))
-    markers = config.get("markers") or [
-        "Alert sent:",
-        "High buy:",
-        "WebSocket connected",
-        "Subscription confirmed by RPC",
-    ]
-    freshness = parse_any_log_freshness(logs, markers, int(config.get("stale_after_seconds", 3600)))
     ready = "WebSocket connected" in logs and "Subscription confirmed by RPC" in logs
-    errors = [line for line in logs.splitlines() if HIGHBUY_ERROR.search(line)]
-    ok = freshness["ok"] and ready and not errors
-    if not ready:
-        error = "WebSocket connected/subscription confirmation logs were not found"
-    elif errors:
+    errors = _recent_matching_lines(logs, HIGHBUY_ERROR)
+    failing = any("fatal" in line.lower() or "panic" in line.lower() for line in errors) or len(errors) >= int(config.get("error_threshold", 3))
+    ok = state["running"] and not failing
+    if not state["running"]:
+        error = f"Container is {state['status']} (health {state['health'] or 'not configured'})"
+    elif failing:
         error = errors[-1].split(maxsplit=1)[-1][-500:]
     else:
-        error = freshness["error"]
+        error = ""
     return {
         "name": "HighBuy Monitor",
         "container": container_name,
         "ok": ok,
         "ready": ready,
-        "age_seconds": freshness.get("age_seconds"),
-        "marker": freshness.get("marker"),
+        "summary": "running; RPC subscribed" if ready else "running; startup log outside tail",
         "error_count": len(errors),
         "error": "" if ok else error,
     }
@@ -468,15 +487,7 @@ def highbuy_monitor_results(config: dict[str, Any] | None = None) -> dict[str, A
 
 def nawa_valdora_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
-    logs = _container_logs(config.get("container", DEFAULT_NAWA_CONTAINER), int(config.get("log_tail_lines", 1000)))
-    now = datetime.now(timezone.utc)
-    block = None
-    block_stamp = None
-    for line in logs.splitlines():
-        match = NAWA_BLOCK_LINE.search(line)
-        stamp = _docker_timestamp(line)
-        if match and stamp and (block_stamp is None or stamp > block_stamp):
-            block, block_stamp = int(next(value for value in match.groups() if value)), stamp
+    state = _container_state(config.get("container", DEFAULT_NAWA_CONTAINER))
 
     def read_rpc(label: str, url: str) -> dict[str, Any]:
         try:
@@ -493,25 +504,26 @@ def nawa_valdora_results(config: dict[str, Any] | None = None) -> dict[str, Any]
         rpc_results = list(pool.map(lambda item: read_rpc(*item), rpcs))
 
     heights = [item["height"] for item in rpc_results if item["height"] is not None]
+    internal = next((item["height"] for item in rpc_results if item["name"] == "Internal RPC"), None)
+    public_heights = [item["height"] for item in rpc_results if item["name"] != "Internal RPC" and item["height"] is not None]
     max_gap = int(config.get("max_block_gap", 20))
-    age = None if block_stamp is None else max(0, int((now - block_stamp.astimezone(timezone.utc)).total_seconds()))
     rpc_spread = max(heights) - min(heights) if len(heights) == len(rpc_results) and heights else None
-    bot_gap = max(abs(block - height) for height in heights) if block is not None and len(heights) == len(rpc_results) else None
+    internal_gap = max(abs(internal - height) for height in public_heights) if internal is not None and len(public_heights) == len(rpc_results) - 1 else None
     errors = []
+    if not state["running"]:
+        errors.append(f"Container is {state['status']} (health {state['health'] or 'not configured'})")
     if len(heights) != len(rpc_results):
         errors.append("RPC status unavailable: " + ", ".join(item["name"] for item in rpc_results if item["height"] is None))
+    if internal is None:
+        errors.append("Internal RPC height unavailable")
     if any(item["catching_up"] for item in rpc_results):
         errors.append("RPC still syncing: " + ", ".join(item["name"] for item in rpc_results if item["catching_up"]))
-    if block is None:
-        errors.append("No timestamped bot block height found in container logs")
-    elif age > int(config.get("stale_after_seconds", 300)):
-        errors.append(f"Bot block height is stale ({age}s old)")
     if rpc_spread is not None and rpc_spread > max_gap:
         errors.append(f"RPC heights differ by {rpc_spread} blocks (limit {max_gap})")
-    if bot_gap is not None and bot_gap > max_gap:
-        errors.append(f"Bot differs from an RPC by {bot_gap} blocks (limit {max_gap})")
-    return {"name": "Nawa Valdora", "ok": not errors, "height": block, "age_seconds": age,
-            "rpcs": rpc_results, "rpc_spread": rpc_spread, "bot_gap": bot_gap, "error": "; ".join(errors)}
+    if internal_gap is not None and internal_gap > max_gap:
+        errors.append(f"Internal RPC differs from a public RPC by {internal_gap} blocks (limit {max_gap})")
+    return {"name": "Nawa Valdora", "ok": not errors, "height": internal,
+            "rpcs": rpc_results, "rpc_spread": rpc_spread, "internal_gap": internal_gap, "error": "; ".join(errors)}
 
 
 def _last_advance_age(samples: list[dict[str, Any]], field: str, now: datetime) -> int | None:
@@ -582,27 +594,66 @@ def tokenx_vault_results(config: dict[str, Any] | None = None) -> dict[str, Any]
 
 
 def usdt_backfill_results(name: str, config: dict[str, Any], container: str) -> dict[str, Any]:
-    logs = _container_logs(config.get("container", container), int(config.get("log_tail_lines", 1000)))
+    container_name = config.get("container", container)
+    state = _container_state(container_name)
+    logs = _container_logs(container_name, int(config.get("log_tail_lines", 1000)))
     now = datetime.now(timezone.utc)
+    scans = []
+    websocket = []
     samples = []
     for line in logs.splitlines():
         stamp = _docker_timestamp(line)
         if not stamp:
             continue
+        scan = LIVE_SCAN_LINE.search(line)
+        ws_result = LIVE_SCAN_RESULT.search(line)
+        if scan:
+            scans.append({"stamp": stamp, "height": int(scan["latest"]), "backlog": int(scan["backlog"])})
+        if ws_result:
+            websocket.append({"stamp": stamp, "height": int(ws_result["height"]), "decoded": int(ws_result["decoded"])})
         full = BACKFILL_LINE.search(line)
         simple = HTTP_BLOCK_LINE.search(line)
         if full:
             samples.append({"stamp": stamp, "height": int(full["end"]), "backlog": int(full["backlog"])})
         elif simple:
             samples.append({"stamp": stamp, "height": int(simple.group(1)), "backlog": None})
+    if scans:
+        scans.sort(key=lambda item: item["stamp"])
+        websocket.sort(key=lambda item: item["stamp"])
+        latest_scan = scans[-1]
+        age = max(0, int((now - latest_scan["stamp"].astimezone(timezone.utc)).total_seconds()))
+        stale_after = int(config.get("live_scan_stale_seconds", 300))
+        errors = []
+        if not state["running"]:
+            errors.append(f"Container is {state['status']} (health {state['health'] or 'not configured'})")
+        if age > stale_after or _last_advance_age(scans, "height", now) is None or _last_advance_age(scans, "height", now) > stale_after:
+            errors.append("Live scan is stale or chain height is not advancing")
+        ws_progress_age = _last_advance_age(websocket, "height", now)
+        if not websocket or ws_progress_age is None or ws_progress_age > stale_after:
+            errors.append("WebSocket block height is not advancing")
+        known_provider_issue = container == DEFAULT_BEP20_CONTAINER and bool(_recent_matching_lines(logs, TATUM_CREDIT_FAILURE, stale_after))
+        backlog = latest_scan["backlog"]
+        if backlog > int(config.get("max_backlog_blocks", 500)) and not known_provider_issue:
+            errors.append(f"Backlog {backlog} exceeds {config.get('max_backlog_blocks', 500)}")
+        summary = f"WS live; HTTP backlog {backlog:,}"
+        if known_provider_issue and backlog > int(config.get("max_backlog_blocks", 500)):
+            summary += " (known Tatum 402)"
+        return {"name": name, "ok": not errors, "height": latest_scan["height"], "backlog": backlog,
+                "age_seconds": age, "status": state["status"], "verified": True,
+                "summary": summary, "error": "; ".join(errors)}
     samples.sort(key=lambda item: item["stamp"])
     if not samples:
         return {"name": name, "ok": False, "height": None, "backlog": None,
-                "age_seconds": None, "error": "No HTTP backfill block found in container logs"}
+                "age_seconds": None, "status": state["status"], "verified": False,
+                "summary": "no scan activity found" if state["running"] else "container stopped",
+                "error": "No Live scan or HTTP block lines found in recent logs" if state["running"]
+                         else f"Container is {state['status']} (health {state['health'] or 'not configured'})"}
     latest = samples[-1]
     age = max(0, int((now - latest["stamp"].astimezone(timezone.utc)).total_seconds()))
     max_backlog = int(config.get("max_backlog_blocks", 500))
     errors = []
+    if not state["running"]:
+        errors.append(f"Container is {state['status']} (health {state['health'] or 'not configured'})")
     if age > int(config.get("stale_after_seconds", 7200)):
         errors.append(f"HTTP backfill status is stale ({age}s old)")
     progress_age = _last_advance_age(samples, "height", now)
@@ -621,7 +672,8 @@ def usdt_backfill_results(name: str, config: dict[str, Any], container: str) -> 
     if backlog is not None and backlog > max_backlog:
         errors.append(f"Backlog {backlog} exceeds {max_backlog}")
     return {"name": name, "ok": not errors, "height": latest["height"],
-            "backlog": backlog, "age_seconds": age, "error": "; ".join(errors)}
+            "backlog": backlog, "age_seconds": age, "status": state["status"], "verified": True,
+            "error": "; ".join(errors)}
 
 
 def sheets_sync_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -686,26 +738,19 @@ def system_service_results(config: dict[str, Any] | None = None) -> dict[str, An
     watchman = services.get("wallet-watchman.service") or {}
     activity = watchman.get("activity") or {}
     watchman_active = watchman.get("active_state") == "active" and watchman.get("sub_state") == "running"
-    last_reload = activity.get("last_reload_at")
-    try:
-        reload_stamp = datetime.fromisoformat(last_reload)
-        reload_age = max(0, int((datetime.now(timezone.utc) - reload_stamp.astimezone(timezone.utc)).total_seconds()))
-    except (TypeError, ValueError):
-        reload_age = None
     wallets = activity.get("wallet_count")
     failures = int(activity.get("rpc_failures_10m") or 0)
-    reload_limit = int(config.get("reload_timeout_seconds", 900))
     rpc_limit = int(config.get("rpc_failure_threshold", 3))
     watchman_issues = []
     if not watchman_active:
         watchman_issues.append("systemd unit is not running")
-    if reload_age is None or reload_age > reload_limit or not wallets:
-        watchman_issues.append("No successful wallet reload in the last 15 minutes")
     if failures >= rpc_limit:
         watchman_issues.append(f"{failures} RPC failures in the last 10 minutes")
     watchman_row = {
         "name": "Wallet Watchman", "ok": not watchman_issues,
-        "summary": f"{wallets or '-'} wallets; reload {f'{reload_age // 60}m ago' if reload_age is not None else 'unknown'}; RPC failures {failures}/10m",
+        "summary": (f"running; {f'{wallets} wallets' if wallets else 'wallet count unknown'}; "
+                    f"{'RPC failures ' + str(failures) + '/10m' if activity else 'RPC error check unavailable'}"
+                    if watchman_active else "systemd not running"),
         "error": "; ".join(watchman_issues),
     }
 
@@ -837,7 +882,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
         bot_checks.append({"name": "Zig USD Only Alerts", "ok": zig_usd_results["ok"], "summary": f"last TX processing {age}"})
     if wallet_results is not None:
         if wallet_results["ok"]:
-            wallet_summary = "ws connected, no recent Telegram errors"
+            wallet_summary = wallet_results.get("summary", "container running")
         else:
             wallet_summary = wallet_results.get("error", "needs attention")[:80]
         bot_checks.append({"name": "Wallet Monitor", "ok": wallet_results["ok"], "summary": wallet_summary})
@@ -849,16 +894,16 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
         bot_checks.append({"name": "Stake Unstake", "ok": stake_results["ok"], "summary": f"block processor logs {age}"})
     if mdf_results is not None:
         if mdf_results["ok"]:
-            mdf_summary = "ws subscribed, Telegram polling clean"
+            mdf_summary = mdf_results.get("summary", "container running")
         else:
             mdf_summary = mdf_results.get("error", "needs attention")[:80]
         bot_checks.append({"name": "MDF Tracker", "ok": mdf_results["ok"], "summary": mdf_summary})
     if highbuy_results is not None:
-        age = "missing" if highbuy_results.get("age_seconds") is None else f"{highbuy_results['age_seconds']}s ago"
-        bot_checks.append({"name": "HighBuy Monitor", "ok": highbuy_results["ok"], "summary": f"{highbuy_results.get('marker') or 'activity'} {age}"})
+        bot_checks.append({"name": "HighBuy Monitor", "ok": highbuy_results["ok"],
+                           "summary": highbuy_results.get("summary", "container running" if highbuy_results["ok"] else highbuy_results.get("error", "needs attention"))})
     if nawa_results is not None:
-        gap = "unknown" if nawa_results.get("bot_gap") is None else str(nawa_results["bot_gap"])
-        bot_checks.append({"name": "Nawa Valdora", "ok": nawa_results["ok"], "summary": f"block {nawa_results.get('height') or '-'}, max RPC gap {gap}"})
+        gap = "unknown" if nawa_results.get("internal_gap") is None else str(nawa_results["internal_gap"])
+        bot_checks.append({"name": "Nawa Valdora", "ok": nawa_results["ok"], "summary": f"internal RPC {nawa_results.get('height') or '-'}, max gap {gap}"})
     if tokenx_results is not None:
         streams = tokenx_results.get("streams", [])
         healthy = sum(1 for item in streams if item["ok"])
@@ -868,7 +913,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
             lag = result.get("backlog")
             lag_text = "lag unverified" if lag is None else f"backlog {lag}"
             bot_checks.append({"name": result["name"], "ok": result["ok"],
-                               "summary": f"HTTP block {result.get('height') or '-'}, {lag_text}"})
+                               "summary": result.get("summary") or f"HTTP block {result.get('height') or '-'}, {lag_text}"})
     if sheets_results is not None:
         last = sheets_results.get("last_completed") or "never"
         bot_checks.append({"name": "Sheets Sync", "ok": sheets_results["ok"],
@@ -911,7 +956,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
     lines.append("<pre>" + html.escape("\n\n".join(rows)) + "</pre>")
 
     if nawa_results is not None:
-        rpc_rows = [f"Bot: {nawa_results.get('height') or '-'}  Max gap: {nawa_results.get('bot_gap') if nawa_results.get('bot_gap') is not None else '-'}"]
+        rpc_rows = [f"Internal RPC: {nawa_results.get('height') or '-'}  Max gap: {nawa_results.get('internal_gap') if nawa_results.get('internal_gap') is not None else '-'}"]
         rpc_rows.extend(f"{row['name']}: {row['height'] if row['height'] is not None else 'unavailable'}{' (syncing)' if row.get('catching_up') else ''}"
                         for row in nawa_results.get("rpcs", []))
         lines.extend(["", "— <b>Nawa Valdora Heights</b> —", "<pre>" + html.escape("\n".join(rpc_rows)) + "</pre>"])

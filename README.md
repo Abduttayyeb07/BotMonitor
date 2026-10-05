@@ -106,28 +106,33 @@ Pakistan time. Each check can fail independently without hiding the other bots.
 The report uses Docker log timestamps and container health, plus these live
 checks:
 
-- Nawa Valdora reads the most recent timestamped bot block height and queries
-  `/status` on ZigScan, CryptoComics, and Numia. It requires each RPC and the bot
-  to be within 20 blocks and the bot height log to be less than five minutes old.
-  The bot must log a recognizable `block height: 123456` or `processed block
-  123456` line; otherwise the report says the processed height is unavailable.
+- Nawa Valdora checks that `zigchain-wallet-monitor` is running and compares
+  `/status` heights from its internal RPC, ZigScan, CryptoComics, and Numia.
+  The internal height must be within 20 blocks of every public RPC.
 - TokenX Vault reads the latest `HTTP backfill ... backlog=N` line for BSC and
   Ethereum USDT/USDC, requires each backlog at most 500 blocks, and checks that
   `tokenx-vault-postgres` is running and Docker reports it healthy. PostgreSQL
   checkpoint messages alone do not establish current database health.
-- BEP20 and ETH USDT read `Last HTTP block: N` or explicit backfill lines and
-  check that the height advances. If the log is at most two minutes old, the
-  report also compares it to the current public RPC height and enforces the
-  500-block limit. Older hourly status lines show `lag unverified`; comparing
-  those to a live chain head would overstate the actual backlog.
+- BEP20 and ETH USDT read their continuous `Live scan` and `Live scan result`
+  lines. Both chain height and WebSocket height must advance within five
+  minutes. ETH backlog must remain at most 500 blocks. BEP20's known Tatum 402
+  credit failure can leave HTTP backfill far behind even while WebSocket data
+  is live; the backlog is shown in the report without creating another alert
+  for that known failure. Missing scan lines are reported as an issue because
+  these bots normally emit them continuously.
 - Sheets Sync requires a completed run updating all three configured vaults.
   The last complete run must be within 75 minutes, consecutive runs must be no
   more than 75 minutes apart, and an incomplete run gets a five-minute grace
   period before it is reported as an issue.
-- Wallet Watchman uses the host collector's journal summary. The daily Bots
-  report requires a nonzero wallet count and a successful DB reload within 15
-  minutes. Three RPC failures within ten minutes create one deduplicated
-  incident; an isolated timeout does not. Zigchain Exporter checks that systemd
+- Wallet Monitor, MDF Tracker, and HighBuy use Docker running/health state and
+  do not expect startup WebSocket lines or occasional buy alerts to repeat.
+  Three recent Telegram polling
+  failures within ten minutes are reported; a recent fatal Wallet Monitor
+  error is reported immediately.
+- Wallet Watchman uses the host collector's journal summary. Wallet reload
+  lines are displayed if present but are not required as a heartbeat. Three
+  RPC failures within ten minutes create one deduplicated incident; an isolated
+  timeout does not. Zigchain Exporter checks that systemd
   reports it running. If `bot_reports.system_services.exporter_metrics_url` is
   configured, its HTTP response is also checked; until then metrics delivery
   is shown as unverified. A collector snapshot older than 60 seconds is treated

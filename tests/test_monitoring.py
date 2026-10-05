@@ -182,10 +182,24 @@ class MonitoringRegressionTests(unittest.TestCase):
             "2026-10-05T10:00:01Z [ws] subscription acknowledged for tx-query",
             '2026-10-05T10:02:00Z error: [polling_error] {"code":"EFATAL","message":"EFATAL: AggregateError"}',
         ])
-        with patch('monitor.reports._container_logs', return_value=logs):
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 3, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
             result = wallet_monitor_results({'container': 'wallet-monitor'})
         self.assertFalse(result['ok'])
         self.assertIn('EFATAL', result['error'])
+
+    def test_wallet_monitor_does_not_require_repeated_startup_ws_logs(self):
+        logs = "2026-10-05T08:00:00Z [ws] Connected\n2026-10-05T08:00:01Z [ws] subscription acknowledged\n"
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 30, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = wallet_monitor_results()
+        self.assertTrue(result['ok'])
 
     def test_zigchain_bot_ignores_ssh_errors_when_status_is_fresh(self):
         logs = "\n".join([
@@ -218,7 +232,9 @@ class MonitoringRegressionTests(unittest.TestCase):
             "2026-10-05T10:35:23.312Z [INFO] [WS] Subscribed to MDF create_denom: tm.event='Tx'",
             "2026-10-05T10:35:23.313Z [INFO] [WS] Subscribed to CreatePairAndProvideLiquidity: tm.event='Tx'",
         ])
-        with patch('monitor.reports._container_logs', return_value=logs), patch('monitor.reports.datetime') as dt:
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
             dt.now.return_value = datetime(2026, 10, 5, 10, 36, tzinfo=ZoneInfo('UTC'))
             dt.fromisoformat.side_effect = datetime.fromisoformat
             result = mdf_tracker_results({'container': 'mdf-tracker'})
@@ -230,12 +246,25 @@ class MonitoringRegressionTests(unittest.TestCase):
             "2026-10-05T10:35:23.311Z [INFO] [WS] Connected",
             "2026-10-05T10:35:23.312Z [INFO] [WS] Subscribed to MDF create_denom: tm.event='Tx'",
             "2026-10-05T10:35:23.313Z [INFO] [WS] Subscribed to CreatePairAndProvideLiquidity: tm.event='Tx'",
+            "2026-10-05T10:58:40.285Z [ERROR] [TG] Cannot reach api.telegram.org - network/DNS issue.",
+            "2026-10-05T10:58:41.285Z [ERROR] [TG] Cannot reach api.telegram.org - network/DNS issue.",
             "2026-10-05T10:58:42.285Z [ERROR] [TG] Cannot reach api.telegram.org - network/DNS issue.",
         ])
-        with patch('monitor.reports._container_logs', return_value=logs):
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 59, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
             result = mdf_tracker_results({'container': 'mdf-tracker'})
         self.assertFalse(result['ok'])
         self.assertIn('Cannot reach api.telegram.org', result['error'])
+
+    def test_mdf_tracker_running_is_healthy_after_startup_logs_age_out(self):
+        with patch('monitor.reports._container_logs', return_value=''), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}):
+            result = mdf_tracker_results()
+        self.assertTrue(result['ok'])
+        self.assertIn('outside tail', result['summary'])
 
     def test_highbuy_reconnect_then_subscription_is_healthy(self):
         logs = "\n".join([
@@ -243,9 +272,17 @@ class MonitoringRegressionTests(unittest.TestCase):
             "2026-10-05T10:21:30Z WebSocket connected",
             "2026-10-05T10:21:31Z Subscription confirmed by RPC",
         ])
-        with patch('monitor.reports._container_logs', return_value=logs), patch('monitor.reports.datetime') as dt:
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
             dt.now.return_value = datetime(2026, 10, 5, 10, 22, tzinfo=ZoneInfo('UTC'))
             dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = highbuy_monitor_results()
+        self.assertTrue(result['ok'])
+
+    def test_highbuy_no_new_buy_is_not_a_failure(self):
+        with patch('monitor.reports._container_logs', return_value=''), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}):
             result = highbuy_monitor_results()
         self.assertTrue(result['ok'])
 
@@ -258,35 +295,29 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertIn('Check unavailable', message)
         self.assertLessEqual(len(message), 4096)
 
-    def test_nawa_block_gap_compares_all_three_rpcs(self):
-        logs = '2026-10-05T10:40:00Z processed block height: 12680019\n'
-        heights = iter([12680020, 12680018, 12680045])
-        def rpc_response(*_args, **_kwargs):
-            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {'latest_block_height': str(next(heights))}}})
-        with patch('monitor.reports._container_logs', return_value=logs), \
-             patch('monitor.reports.requests.get', side_effect=rpc_response), \
-             patch('monitor.reports.datetime') as dt:
-            dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
-            dt.fromisoformat.side_effect = datetime.fromisoformat
+    def test_nawa_internal_rpc_gap_compares_three_public_rpcs(self):
+        heights = dict(zip(('internal-bots-rpc', 'zigscan', 'cryptocomics', 'numia'), (12680019, 12680020, 12680018, 12680045)))
+        def rpc_response(url, **_kwargs):
+            height = next(value for key, value in heights.items() if key in url)
+            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {'latest_block_height': str(height)}}})
+        with patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
             result = nawa_valdora_results()
         self.assertFalse(result['ok'])
-        self.assertEqual(result['bot_gap'], 26)
+        self.assertEqual(result['internal_gap'], 26)
         self.assertIn('26 blocks', result['error'])
 
-    def test_nawa_accepts_three_synced_rpcs(self):
-        logs = '2026-10-05T10:40:00Z processed block height: 12680019\n'
-        heights = iter([12680020, 12680018, 12680021])
-        def rpc_response(*_args, **_kwargs):
+    def test_nawa_accepts_internal_and_three_synced_public_rpcs(self):
+        heights = dict(zip(('internal-bots-rpc', 'zigscan', 'cryptocomics', 'numia'), (12680019, 12680020, 12680018, 12680021)))
+        def rpc_response(url, **_kwargs):
+            height = next(value for key, value in heights.items() if key in url)
             return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {
-                'latest_block_height': str(next(heights)), 'catching_up': False}}})
-        with patch('monitor.reports._container_logs', return_value=logs), \
-             patch('monitor.reports.requests.get', side_effect=rpc_response), \
-             patch('monitor.reports.datetime') as dt:
-            dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
-            dt.fromisoformat.side_effect = datetime.fromisoformat
+                'latest_block_height': str(height), 'catching_up': False}}})
+        with patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
             result = nawa_valdora_results()
         self.assertTrue(result['ok'])
-        self.assertEqual(result['bot_gap'], 2)
+        self.assertEqual(result['internal_gap'], 2)
 
     def test_tokenx_flags_backlog_over_500_and_checks_postgres_health(self):
         lines = []
@@ -316,6 +347,7 @@ class MonitoringRegressionTests(unittest.TestCase):
                 '2026-10-05T10:40:00Z Last HTTP block: 26077300\n')
         rpc = SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': hex(26077320)})
         with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
              patch('monitor.reports.requests.post', return_value=rpc), patch('monitor.reports.datetime') as dt:
             dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
             dt.fromisoformat.side_effect = datetime.fromisoformat
@@ -327,12 +359,72 @@ class MonitoringRegressionTests(unittest.TestCase):
     def test_usdt_backfill_does_not_compare_old_log_to_live_head(self):
         logs = '2026-10-05T09:40:00Z Last HTTP block: 26077000\n'
         with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
              patch('monitor.reports.requests.post') as rpc, patch('monitor.reports.datetime') as dt:
             dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
             dt.fromisoformat.side_effect = datetime.fromisoformat
             result = usdt_backfill_results('ETH USDT', {}, 'eth-usdt-telegram-monitor')
         self.assertIsNone(result['backlog'])
         rpc.assert_not_called()
+
+    def test_bep20_live_scan_shows_known_tatum_backlog_without_false_alert(self):
+        logs = "\n".join([
+            "2026-10-05T12:18:00Z Live scan [122427306-122427310, 122427311-122427315]; latest=125866752; backlog=3439446 block(s)",
+            "2026-10-05T12:18:03Z Live scan result: 0 matching USDT transfer(s) across 2 worker(s) | WebSocket decoded total=570444885, matched total=15, last WS block=125866758",
+            "2026-10-05T12:18:03Z Worker 1 failed: Error: server response 402 Payment Required. Retrying this range next tick.",
+            "2026-10-05T12:18:06Z Live scan [122427311-122427315, 122427316-122427320]; latest=125866758; backlog=3439447 block(s)",
+            "2026-10-05T12:18:08Z Live scan result: 0 matching USDT transfer(s) across 2 worker(s) | WebSocket decoded total=570446133, matched total=15, last WS block=125866770",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 12, 18, 12, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = usdt_backfill_results('BEP20 USDT', {}, 'bep20-usdt-telegram-monitor')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['backlog'], 3439447)
+        self.assertIn('known Tatum 402', result['summary'])
+
+    def test_eth_live_scan_requires_ws_and_chain_progress(self):
+        logs = "\n".join([
+            "2026-10-05T12:17:37Z Live scan result: 0 matching USDT transfer(s) | WebSocket decoded total=82230, matched total=0, last WS block=26126114",
+            "2026-10-05T12:17:37Z Live scan 26126112-26126113; latest=26126114; backlog=2 block(s)",
+            "2026-10-05T12:18:02Z Live scan result: 0 matching USDT transfer(s) | WebSocket decoded total=82418, matched total=0, last WS block=26126116",
+            "2026-10-05T12:18:03Z Live scan 26126115-26126115; latest=26126116; backlog=1 block(s)",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 12, 18, 12, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = usdt_backfill_results('ETH USDT', {}, 'eth-usdt-telegram-monitor')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['backlog'], 1)
+        self.assertIn('WS live', result['summary'])
+
+    def test_known_tatum_failure_does_not_hide_stalled_websocket(self):
+        logs = "\n".join([
+            "2026-10-05T12:18:00Z Live scan 122427306-122427310; latest=125866752; backlog=3439446 block(s)",
+            "2026-10-05T12:18:03Z Live scan result: WebSocket decoded total=570444885, matched total=15, last WS block=125866758",
+            "2026-10-05T12:18:04Z Worker failed: 402 Payment Required",
+            "2026-10-05T12:18:06Z Live scan 122427311-122427315; latest=125866758; backlog=3439447 block(s)",
+            "2026-10-05T12:18:08Z Live scan result: WebSocket decoded total=570445000, matched total=15, last WS block=125866758",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 12, 18, 12, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = usdt_backfill_results('BEP20 USDT', {}, 'bep20-usdt-telegram-monitor')
+        self.assertFalse(result['ok'])
+        self.assertIn('WebSocket block height is not advancing', result['error'])
+
+    def test_live_scan_bot_stopped_output_is_reported_even_if_container_runs(self):
+        with patch('monitor.reports._container_logs', return_value=''), \
+             patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}):
+            result = usdt_backfill_results('ETH USDT', {}, 'eth-usdt-telegram-monitor')
+        self.assertFalse(result['ok'])
+        self.assertIn('No Live scan', result['error'])
 
     def test_sheets_sync_requires_three_vault_updates_each_hour(self):
         vaults = ('Stablecoin Yield Vault', 'USDC Opportunistic Credit Vault', 'USDC Core Income Vault')
@@ -423,7 +515,7 @@ class MonitoringRegressionTests(unittest.TestCase):
             findings = systemd_checks({'services': []}, str(status_path))
         self.assertEqual(findings[0]['type'], 'SYSTEMD_COLLECTOR_MISSING')
 
-    def test_systemd_check_flags_watchman_when_reload_stops(self):
+    def test_systemd_check_does_not_require_watchman_reload_heartbeat(self):
         with tempfile.TemporaryDirectory() as directory:
             status_path = Path(directory) / 'systemd-status.json'
             snapshot = {'updated_at': datetime.now(timezone.utc).isoformat(), 'services': {
@@ -433,7 +525,7 @@ class MonitoringRegressionTests(unittest.TestCase):
             }}
             status_path.write_text(json.dumps(snapshot), encoding='utf-8')
             findings = systemd_checks({'services': [{'name': 'wallet-watchman', 'unit': 'wallet-watchman.service'}]}, str(status_path))
-        self.assertEqual([item['type'] for item in findings], ['SYSTEMD_ACTIVITY_STALE'])
+        self.assertEqual(findings, [])
 
     def test_rpc_failure_incident_fingerprint_ignores_count(self):
         self.assertEqual(
@@ -453,6 +545,16 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertIn('5329 wallets', result['services'][0]['summary'])
         self.assertIn('metrics not verified', result['services'][1]['summary'])
+
+    def test_watchman_without_collector_activity_is_running_but_unverified(self):
+        snapshot = {'services': {
+            'wallet-watchman.service': {'active_state': 'active', 'sub_state': 'running'},
+            'zigchain-exporter.service': {'active_state': 'active', 'sub_state': 'running'},
+        }}
+        with patch('monitor.reports.read_systemd_snapshot', return_value=snapshot):
+            result = system_service_results()
+        self.assertTrue(result['ok'])
+        self.assertIn('RPC error check unavailable', result['services'][0]['summary'])
 
     def test_system_service_report_flags_empty_exporter_endpoint(self):
         snapshot = {'services': {
