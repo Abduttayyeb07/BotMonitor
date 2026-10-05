@@ -101,8 +101,14 @@ Regression checks: `python -m unittest discover -s tests -v`.
 
 ## Bots report checks
 
-`/botshealth` sends the combined Bots report; the scheduled copy runs at 09:05
-Pakistan time. Each check can fail independently without hiding the other bots.
+`/botshealth` sends the combined Bots report. Frontend and Bots reports are
+both scheduled for 11:00 and 23:00 Pakistan time by default. Set
+`daily_reports.frontend.times` and `daily_reports.bots.times` to
+`["11:00", "23:00"]` in an existing server `config.yaml` (replacing the old
+`time` values). Each delivered slot is stored in SQLite to prevent duplicate
+reports after a restart. A report missed while the monitor is down is sent
+when it returns; if multiple slots were missed, only the latest is sent.
+Each check can fail independently without hiding the other bots.
 The report uses Docker log timestamps and container health, plus these live
 checks:
 

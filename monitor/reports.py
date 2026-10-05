@@ -178,13 +178,17 @@ def frontend_report_message(results: list[dict[str, Any]], generated_at: datetim
     return "\n".join(lines)
 
 
-def should_send_daily_report(now: datetime, report_time: str, last_sent_key: str | None) -> tuple[bool, str]:
-    hour, minute = [int(part) for part in report_time.split(":", 1)]
-    today_key = now.astimezone(PKT).strftime("%Y-%m-%d")
-    if last_sent_key == today_key:
-        return False, today_key
+def should_send_daily_report(now: datetime, report_times: str | list[str], last_sent_key: str | None) -> tuple[bool, str]:
+    """Select the latest due PKT slot; don't replay older missed slots."""
+    times = [report_times] if isinstance(report_times, str) else report_times
+    slots = sorted({tuple(int(part) for part in value.split(":", 1)) for value in times})
+    if not slots or any(hour not in range(24) or minute not in range(60) for hour, minute in slots):
+        raise ValueError("Report times must be HH:MM in 24-hour time")
     current = now.astimezone(PKT)
-    return (current.hour, current.minute) >= (hour, minute), today_key
+    due = [slot for slot in slots if slot <= (current.hour, current.minute)]
+    hour, minute = due[-1] if due else slots[0]
+    slot_key = f"{current:%Y-%m-%d} {hour:02d}:{minute:02d}"
+    return bool(due) and slot_key != last_sent_key, slot_key
 
 
 ZIG_WHALE_LINE = re.compile(

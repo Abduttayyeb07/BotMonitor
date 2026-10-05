@@ -120,12 +120,34 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertIn('1/2 online', message)
         self.assertIn('Bad App', message)
 
-    def test_daily_report_is_sent_once_after_configured_time(self):
-        before = datetime(2026, 10, 5, 8, 59, tzinfo=ZoneInfo('Asia/Karachi'))
-        after = datetime(2026, 10, 5, 9, 0, tzinfo=ZoneInfo('Asia/Karachi'))
-        self.assertEqual(should_send_daily_report(before, '09:00', None), (False, '2026-10-05'))
-        self.assertEqual(should_send_daily_report(after, '09:00', None), (True, '2026-10-05'))
-        self.assertEqual(should_send_daily_report(after, '09:00', '2026-10-05'), (False, '2026-10-05'))
+    def test_reports_are_due_at_eleven_am_and_pm_pakistan_time(self):
+        times = ['11:00', '23:00']
+        pkt = ZoneInfo('Asia/Karachi')
+        before = datetime(2026, 10, 5, 10, 59, tzinfo=pkt)
+        morning = datetime(2026, 10, 5, 11, 0, tzinfo=pkt)
+        evening = datetime(2026, 10, 5, 23, 0, tzinfo=pkt)
+        self.assertEqual(should_send_daily_report(before, times, None), (False, '2026-10-05 11:00'))
+        self.assertEqual(should_send_daily_report(morning, times, None), (True, '2026-10-05 11:00'))
+        self.assertEqual(should_send_daily_report(morning, times, '2026-10-05 11:00'), (False, '2026-10-05 11:00'))
+        self.assertEqual(should_send_daily_report(evening, times, '2026-10-05 11:00'), (True, '2026-10-05 23:00'))
+        self.assertEqual(should_send_daily_report(evening, times, '2026-10-05 23:00'), (False, '2026-10-05 23:00'))
+        self.assertEqual(should_send_daily_report(evening.astimezone(timezone.utc), times, None),
+                         (True, '2026-10-05 23:00'))
+
+    def test_report_delivery_slots_survive_restart_and_are_separate_by_type(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            store = IncidentStore(path)
+            store.mark_report_sent('frontend', '2026-10-05 11:00')
+            store.db.close()
+            restarted = IncidentStore(path)
+            self.assertEqual(restarted.last_report_key('frontend'), '2026-10-05 11:00')
+            self.assertIsNone(restarted.last_report_key('bots'))
+            restarted.mark_report_sent('bots', '2026-10-05 11:00')
+            restarted.mark_report_sent('frontend', '2026-10-05 23:00')
+            self.assertEqual(restarted.last_report_key('frontend'), '2026-10-05 23:00')
+            self.assertEqual(restarted.last_report_key('bots'), '2026-10-05 11:00')
+            restarted.db.close()
 
     def test_frontend_health_command_sends_report(self):
         panel = TelegramBotPanel(None, ['1'], {}, frontend_report_config={'items': [{'name': 'Frontend', 'health_url': 'http://ok'}]})

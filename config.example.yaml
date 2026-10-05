@@ -8,7 +8,7 @@ allow_container_restart: true
 daily_reports:
   frontend:
     enabled: true
-    time: "09:00"
+    times: ["11:00", "23:00"]
     timezone: Asia/Karachi
     items:
       - id: beencointernalcomms
@@ -34,7 +34,7 @@ daily_reports:
         health_url: http://127.0.0.1:4090/
   bots:
     enabled: true
-    time: "09:05"
+    times: ["11:00", "23:00"]
     timezone: Asia/Karachi
 
 bot_reports:

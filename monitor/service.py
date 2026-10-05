@@ -161,10 +161,9 @@ def main() -> None:
     poll_number = 0
     summary_every = max(1, int(config.get("summary_interval_seconds", 300) / max(interval, 1)))
     outage_window = OutageWindow()
-    report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True, "time": "09:00"})
-    bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True, "time": "09:05"})
-    last_frontend_report_key: str | None = None
-    last_bots_report_key: str | None = None
+    report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True})
+    bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True})
+    default_report_times = ["11:00", "23:00"]
     while running:
         cycle_started = time.monotonic()
         poll_number += 1
@@ -220,23 +219,25 @@ def main() -> None:
                         store.mark_alert_sent(key)
         if report_config.get("enabled", False):
             try:
-                due, report_key = should_send_daily_report(datetime.now(PKT), report_config.get("time", "09:00"), last_frontend_report_key)
+                report_times = report_config.get("times") or report_config.get("time") or default_report_times
+                due, report_key = should_send_daily_report(datetime.now(PKT), report_times, store.last_report_key("frontend"))
                 if due:
                     report_items = frontend_report_items(report_config, config.get("projects", {}))
                     report_message = frontend_report_message(frontend_endpoint_results(report_items))
                     if notifier.send(report_message):
-                        last_frontend_report_key = report_key
-                        log.info("daily frontend report delivered: items=%s", len(report_items))
+                        store.mark_report_sent("frontend", report_key)
+                        log.info("scheduled frontend report delivered: slot=%s items=%s", report_key, len(report_items))
             except Exception:
                 log.exception("daily frontend report failed")
         if bots_report_config.get("enabled", False):
             try:
-                due, report_key = should_send_daily_report(datetime.now(PKT), bots_report_config.get("time", "09:05"), last_bots_report_key)
+                report_times = bots_report_config.get("times") or bots_report_config.get("time") or default_report_times
+                due, report_key = should_send_daily_report(datetime.now(PKT), report_times, store.last_report_key("bots"))
                 if due:
                     report_message = collect_bots_report(config.get("bot_reports", {}))
                     if notifier.send(report_message):
-                        last_bots_report_key = report_key
-                        log.info("daily bots report delivered")
+                        store.mark_report_sent("bots", report_key)
+                        log.info("scheduled bots report delivered: slot=%s", report_key)
             except Exception:
                 log.exception("daily bots report failed")
         if poll_number == 1 or poll_number % summary_every == 0:

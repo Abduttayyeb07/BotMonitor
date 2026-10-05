@@ -46,6 +46,24 @@ class IncidentStore:
             )
         """)
         self.db.execute('CREATE TABLE IF NOT EXISTS recovery_queue (fingerprint TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+        self.db.execute('''CREATE TABLE IF NOT EXISTS report_deliveries (
+            report_type TEXT NOT NULL, slot_key TEXT NOT NULL, delivered_at TEXT NOT NULL,
+            PRIMARY KEY (report_type, slot_key)
+        )''')
+        self.db.commit()
+
+    def last_report_key(self, report_type: str) -> str | None:
+        row = self.db.execute(
+            'SELECT slot_key FROM report_deliveries WHERE report_type=? ORDER BY slot_key DESC LIMIT 1',
+            (report_type,),
+        ).fetchone()
+        return row['slot_key'] if row else None
+
+    def mark_report_sent(self, report_type: str, slot_key: str) -> None:
+        self.db.execute(
+            'INSERT OR IGNORE INTO report_deliveries (report_type, slot_key, delivered_at) VALUES (?, ?, ?)',
+            (report_type, slot_key, now()),
+        )
         self.db.commit()
 
     def observe(self, key: str, project: str, service: str, incident_type: str,
