@@ -137,8 +137,14 @@ class MonitoringRegressionTests(unittest.TestCase):
             {'id': 'beencointernalcomms', 'name': 'Beencointernalcomms'},
             {'id': 'zigexchange', 'name': 'ZigExchange'},
         ]}})
-        self.assertEqual(items[0]['health_url'], 'http://host.docker.internal:4173/health')
-        self.assertEqual(items[1]['health_url'], 'http://host.docker.internal:4090/')
+        self.assertEqual(items[0]['health_url'], 'http://127.0.0.1:4173/health')
+        self.assertEqual(items[1]['health_url'], 'http://127.0.0.1:4090/')
+
+    def test_frontend_report_items_normalize_old_host_gateway_urls(self):
+        items = frontend_report_items({'items': [
+            {'name': 'Old URL', 'health_url': 'http://host.docker.internal:4173/health'},
+        ]})
+        self.assertEqual(items[0]['health_url'], 'http://127.0.0.1:4173/health')
 
 
 if __name__ == '__main__':

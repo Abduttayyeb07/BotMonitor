@@ -13,25 +13,25 @@ daily_reports:
     items:
       - id: beencointernalcomms
         name: Beenco Internal Comms
-        health_url: http://host.docker.internal:4173/health
+        health_url: http://127.0.0.1:4173/health
       - id: beencomindshub
         name: Beencomindshub
-        health_url: http://host.docker.internal:3000/health
+        health_url: http://127.0.0.1:3000/health
       - id: liquidity-provider
         name: Liquidity Provider
-        health_url: http://host.docker.internal:5173/health
+        health_url: http://127.0.0.1:5173/health
       - id: vault-automator
         name: VaultAutomator
-        health_url: http://host.docker.internal:4560/
+        health_url: http://127.0.0.1:4560/
       - id: ethzigliquid
         name: EthZigLiquid
-        health_url: http://host.docker.internal:18300/
+        health_url: http://127.0.0.1:18300/
       - id: arkive
         name: Arkive
-        health_url: http://host.docker.internal:8043/health
+        health_url: http://127.0.0.1:8043/health
       - id: zigexchange
         name: ZigExchange
-        health_url: http://host.docker.internal:4090/
+        health_url: http://127.0.0.1:4090/
 
 thresholds:
   disk_warning_percent: 80

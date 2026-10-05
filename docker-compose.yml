@@ -13,8 +13,7 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    extra_hosts:
-      - host.docker.internal:host-gateway
+    network_mode: host
     read_only: true
     tmpfs:
       - /tmp
@@ -22,13 +21,3 @@ services:
     cpus: 0.50
     security_opt:
       - no-new-privileges:true
-
-networks:
-  default:
-    name: botmonitor_monitoring
-    driver: bridge
-    ipam:
-      config:
-        # Use a private subnet dedicated to this monitoring service.
-        # Change it if it overlaps with an existing Docker/VPN/server network.
-        - subnet: 10.254.0.0/24

@@ -32,7 +32,9 @@ Stop it with:
 docker compose down
 ```
 
-Use `host.docker.internal` for health endpoints running on the host. Host systemd monitoring uses the separate collector described below.
+The Compose service uses host networking so health endpoints bound to host
+localhost can be checked with `http://127.0.0.1:PORT/...`. Host systemd
+monitoring uses the separate collector described below.
 
 ## Safe host systemd collector
 
