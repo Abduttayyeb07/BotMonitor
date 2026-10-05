@@ -32,6 +32,89 @@ daily_reports:
       - id: zigexchange
         name: ZigExchange
         health_url: http://127.0.0.1:4090/
+  bots:
+    enabled: true
+    time: "09:05"
+    timezone: Asia/Karachi
+
+bot_reports:
+  zig_whale:
+    container: zig-whale-bot
+    log_tail_lines: 500
+    stale_after_seconds: 180
+    exchanges:
+      - MEXC
+      - Bybit
+      - KuCoin
+      - Gate.io
+      - Bitget
+  zig_usd_alerts:
+    container: zig-usd-only-alerts-zig-only-alerts-1
+    log_tail_lines: 500
+    stale_after_seconds: 300
+    marker: "[PROCESSING] TX:"
+  wallet_monitor:
+    container: wallet-monitor
+    log_tail_lines: 500
+    stale_after_seconds: 3600
+  zigchain_bot:
+    container: zigchain-bot
+    log_tail_lines: 500
+    stale_after_seconds: 300
+    markers:
+      - "Status collection complete"
+      - "PG height fetched"
+  stake_unstake:
+    container: zigchain-monitor
+    log_tail_lines: 500
+    stale_after_seconds: 300
+    markers:
+      - "[processor] catching up blocks"
+      - "[status] live at block"
+  mdf_tracker:
+    container: mdf-tracker
+    log_tail_lines: 500
+    stale_after_seconds: 3600
+    markers:
+      - "[TG] Telegram bot started"
+      - "[WS] Connected"
+      - "[WS] Subscribed to MDF create_denom"
+      - "[WS] Subscribed to CreatePairAndProvideLiquidity"
+  highbuy_monitor:
+    container: highbuy-monitor
+    log_tail_lines: 500
+    stale_after_seconds: 3600
+  nawa_valdora:
+    container: zigchain-wallet-monitor
+    log_tail_lines: 1000
+    stale_after_seconds: 300
+    max_block_gap: 20
+  tokenx_vault:
+    container: bsc-and-eth-token-monitor
+    postgres_container: tokenx-vault-postgres
+    log_tail_lines: 2000
+    stale_after_seconds: 300
+    max_backlog_blocks: 500
+  bep20_usdt:
+    container: bep20-usdt-telegram-monitor
+    log_tail_lines: 1000
+    stale_after_seconds: 7200
+    max_backlog_blocks: 500
+  eth_usdt:
+    container: eth-usdt-telegram-monitor
+    log_tail_lines: 1000
+    stale_after_seconds: 7200
+    max_backlog_blocks: 500
+  sheets_sync:
+    container: sheets-sync
+    log_tail_lines: 500
+    max_gap_seconds: 4500
+    completion_grace_seconds: 300
+  system_services:
+    status_path: /data/systemd-status.json
+    collector_max_age_seconds: 60
+    reload_timeout_seconds: 900
+    rpc_failure_threshold: 3
 
 thresholds:
   disk_warning_percent: 80
@@ -112,9 +195,6 @@ docker:
       critical: true
     - name: zig-whale-bot
       project: zig-whale-bot
-      critical: true
-    - name: zig-alert-bot
-      project: zig-alert-bot
       critical: true
     - name: zig-usd-only-alerts-zig-only-alerts-1
       project: zig-usd-only-alerts
@@ -328,14 +408,6 @@ projects:
         compose_file: /root/saad/MarketZig/docker-compose.yml
         containers:
           - zig-whale-bot
-      - id: zig-alert-bot
-        name: Zig Alert Bot
-        menu_name: Zig Alert Bot
-        compose_project: zig-alert-bot
-        working_dir: /root/saad/zig-alert-bot
-        compose_file: /root/saad/zig-alert-bot/docker-compose.yml
-        containers:
-          - zig-alert-bot
       - id: zig-usd-only-alerts
         name: Zig USD Only Alerts
         menu_name: Zig USD Alerts
@@ -442,11 +514,14 @@ projects:
 systemd:
   # Status is supplied by the safe host-side collector.
   enabled: true
+  collector_max_age_seconds: 60
   services:
     - name: wallet-watchman
       project: wallet-monitor
       unit: wallet-watchman.service
       critical: true
+      reload_timeout_seconds: 900
+      rpc_failure_threshold: 3
     - name: zigchain-exporter
       project: zigchain-exporter
       unit: zigchain-exporter.service

@@ -17,7 +17,7 @@ from .config import env, load_config
 from .docker_checks import checks as docker_checks, log_checks, snapshot as docker_snapshot
 from .incident_store import IncidentStore, fingerprint
 from .notifier import TelegramNotifier
-from .reports import frontend_endpoint_results, frontend_report_items, frontend_report_message, should_send_daily_report
+from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message, should_send_daily_report
 from .telegram_bot import TelegramBotPanel
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -137,7 +137,8 @@ def main() -> None:
     panel = TelegramBotPanel(env(telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")), chat_ids,
                              config.get("projects", {}), config.get("allow_container_restart", False),
                              config.get('database_path', 'data/incidents.db'),
-                             config.get("daily_reports", {}).get("frontend", {}))
+                             config.get("daily_reports", {}).get("frontend", {}),
+                             config.get("bot_reports", {}))
     running = True
     def stop(_signum, _frame):
         nonlocal running
@@ -161,7 +162,9 @@ def main() -> None:
     summary_every = max(1, int(config.get("summary_interval_seconds", 300) / max(interval, 1)))
     outage_window = OutageWindow()
     report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True, "time": "09:00"})
+    bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True, "time": "09:05"})
     last_frontend_report_key: str | None = None
+    last_bots_report_key: str | None = None
     while running:
         cycle_started = time.monotonic()
         poll_number += 1
@@ -226,6 +229,16 @@ def main() -> None:
                         log.info("daily frontend report delivered: items=%s", len(report_items))
             except Exception:
                 log.exception("daily frontend report failed")
+        if bots_report_config.get("enabled", False):
+            try:
+                due, report_key = should_send_daily_report(datetime.now(PKT), bots_report_config.get("time", "09:05"), last_bots_report_key)
+                if due:
+                    report_message = collect_bots_report(config.get("bot_reports", {}))
+                    if notifier.send(report_message):
+                        last_bots_report_key = report_key
+                        log.info("daily bots report delivered")
+            except Exception:
+                log.exception("daily bots report failed")
         if poll_number == 1 or poll_number % summary_every == 0:
             summary = docker_snapshot(config.get("docker", {}))
             active_count = store.db.execute("SELECT COUNT(*) FROM incidents WHERE status='OPEN'").fetchone()[0]

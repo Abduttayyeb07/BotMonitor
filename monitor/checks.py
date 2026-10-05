@@ -6,12 +6,24 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import psutil
 import requests
 
 log = logging.getLogger(__name__)
+
+
+def read_systemd_snapshot(status_path: str, max_age_seconds: int = 60) -> dict[str, Any]:
+    snapshot = json.loads(Path(status_path).read_text(encoding="utf-8"))
+    stamp = datetime.fromisoformat(snapshot["updated_at"].replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError("systemd collector timestamp has no timezone")
+    age = (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds()
+    if age > max_age_seconds or age < -max_age_seconds:
+        raise ValueError(f"systemd collector snapshot is stale ({int(age)}s old)")
+    return snapshot
 
 
 def host_checks(thresholds: dict[str, Any]) -> list[dict[str, str]]:
@@ -37,16 +49,34 @@ def systemd_checks(config: dict[str, Any], status_path: str = "/data/systemd-sta
     if not config.get("enabled", True):
         return findings
     try:
-        snapshot = json.loads(Path(status_path).read_text(encoding="utf-8"))
+        snapshot = read_systemd_snapshot(status_path, int(config.get("collector_max_age_seconds", 60)))
         services = snapshot.get("services", {})
-    except (FileNotFoundError, json.JSONDecodeError, OSError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError, KeyError) as exc:
         return [{"project": "host", "service": "systemd-collector", "type": "SYSTEMD_COLLECTOR_MISSING", "severity": "CRITICAL", "message": f"Cannot read {status_path}: {exc}"}]
     for item in (config.get("services") or []):
         unit = item["unit"]
         current = services.get(unit, {})
         status = current.get("active_state", "unknown")
-        if status != "active":
+        if status != "active" or current.get("sub_state") != "running":
             findings.append({"project": item.get("project", item["name"]), "service": item["name"], "type": "SYSTEMD_DOWN", "severity": "CRITICAL" if item.get("critical", True) else "ERROR", "message": f"systemd unit {unit} is {status}"})
+            continue
+        if unit == "wallet-watchman.service":
+            activity = current.get("activity") or {}
+            last_reload = activity.get("last_reload_at")
+            try:
+                stamp = datetime.fromisoformat(last_reload)
+                age = (datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)).total_seconds()
+            except (TypeError, ValueError):
+                age = float("inf")
+            if age > int(item.get("reload_timeout_seconds", 900)) or not activity.get("wallet_count"):
+                findings.append({"project": item.get("project", item["name"]), "service": item["name"],
+                                 "type": "SYSTEMD_ACTIVITY_STALE", "severity": "ERROR",
+                                 "message": "Wallet Watchman has no recent successful DB wallet reload"})
+            failures = int(activity.get("rpc_failures_10m") or 0)
+            if failures >= int(item.get("rpc_failure_threshold", 3)):
+                findings.append({"project": item.get("project", item["name"]), "service": item["name"],
+                                 "type": "SYSTEMD_RPC_FAILURE", "severity": "ERROR",
+                                 "message": f"Wallet Watchman logged {failures} RPC failures in the last 10 minutes"})
     return findings
 
 

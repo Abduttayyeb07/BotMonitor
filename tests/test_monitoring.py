@@ -1,16 +1,19 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from monitor.checks import systemd_checks
 from monitor.config import load_config
 from monitor.docker_checks import checks, inventory
 from monitor.incident_store import IncidentStore, fingerprint
-from monitor.reports import frontend_report_items, frontend_report_message, should_send_daily_report
+from monitor.reports import collect_bots_report, frontend_report_items, frontend_report_message, highbuy_monitor_results, mdf_tracker_results, nawa_valdora_results, parse_log_freshness, parse_zig_whale_logs, sheets_sync_results, should_send_daily_report, stake_unstake_results, system_service_results, tokenx_vault_results, usdt_backfill_results, wallet_monitor_results, zigchain_bot_results
+from systemd.collector import watchman_activity
 from monitor.service import collapse_project_failures, OutageWindow
 from monitor.telegram_bot import TelegramBotPanel
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -132,6 +135,13 @@ class MonitoringRegressionTests(unittest.TestCase):
             panel.handle({'message': {'chat': {'id': 1}, 'text': '/frontendhealth'}})
         self.assertIn('Daily Frontend Report', send.call_args.args[1])
 
+    def test_bots_health_command_sends_combined_report(self):
+        panel = TelegramBotPanel(None, ['1'], {}, bot_report_config={'zig_whale': {'container': 'zig-whale-bot'}})
+        with patch('monitor.telegram_bot.collect_bots_report', return_value='<b>Daily Bots Report</b>'), \
+             patch.object(panel, 'send') as send:
+            panel.handle({'message': {'chat': {'id': 1}, 'text': '/botshealth'}})
+        self.assertIn('Daily Bots Report', send.call_args.args[1])
+
     def test_frontend_report_items_fill_known_urls_from_project_list(self):
         items = frontend_report_items({}, {'frontend': {'items': [
             {'id': 'beencointernalcomms', 'name': 'Beencointernalcomms'},
@@ -145,6 +155,317 @@ class MonitoringRegressionTests(unittest.TestCase):
             {'name': 'Old URL', 'health_url': 'http://host.docker.internal:4173/health'},
         ]})
         self.assertEqual(items[0]['health_url'], 'http://127.0.0.1:4173/health')
+
+    def test_zig_whale_parser_tracks_exchange_freshness(self):
+        logs = "\n".join([
+            "2026-10-05T09:33:41.371833443Z [2026-10-05T09:33:41.371Z] [MEXC] monitoring — largest buy this cycle=5.5K ZIG threshold=1.0M ZIG 24hVol=183.2K USDT",
+            "2026-10-05T09:34:41.607090620Z [2026-10-05T09:34:41.603Z] [Bybit] monitoring — largest buy this cycle=0 ZIG threshold=1.0M ZIG 24hVol=1.1M USDT",
+        ])
+        now = datetime(2026, 10, 5, 9, 35, tzinfo=ZoneInfo('UTC'))
+        results = parse_zig_whale_logs(logs, ['MEXC', 'Bybit', 'KuCoin'], 180, now)
+        self.assertTrue(results[0]['ok'])
+        self.assertEqual(results[0]['largest_buy'], '5.5K ZIG')
+        self.assertTrue(results[1]['ok'])
+        self.assertFalse(results[2]['ok'])
+        self.assertEqual(results[2]['error'], 'No recent monitoring line found')
+
+    def test_log_freshness_finds_recent_processing_marker(self):
+        logs = "2026-10-05T10:08:38.152275907Z [PROCESSING] TX: D57B\n"
+        now = datetime(2026, 10, 5, 10, 9, tzinfo=ZoneInfo('UTC'))
+        result = parse_log_freshness(logs, '[PROCESSING] TX:', 300, now)
+        self.assertTrue(result['ok'])
+        self.assertLess(result['age_seconds'], 300)
+
+    def test_wallet_monitor_flags_recent_telegram_errors(self):
+        logs = "\n".join([
+            "2026-10-05T10:00:00Z [ws] Connected",
+            "2026-10-05T10:00:01Z [ws] subscription acknowledged for tx-query",
+            '2026-10-05T10:02:00Z error: [polling_error] {"code":"EFATAL","message":"EFATAL: AggregateError"}',
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs):
+            result = wallet_monitor_results({'container': 'wallet-monitor'})
+        self.assertFalse(result['ok'])
+        self.assertIn('EFATAL', result['error'])
+
+    def test_zigchain_bot_ignores_ssh_errors_when_status_is_fresh(self):
+        logs = "\n".join([
+            "2026-10-05T10:26:15Z [2026-10-05 10:26:15] INFO: [] Status collection complete",
+            "2026-10-05T10:26:16Z [2026-10-05 10:26:16] ERROR: [] SSH connection error",
+            '2026-10-05T10:26:16Z     err: "All configured authentication methods failed"',
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 27, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = zigchain_bot_results({'container': 'zigchain-bot'})
+        self.assertTrue(result['ok'])
+
+    def test_stake_unstake_requires_fresh_block_logs_and_flags_errors(self):
+        logs = "\n".join([
+            "2026-10-05T10:30:39.698790446Z [processor] catching up blocks 12680100 -> 12680102",
+            "2026-10-05T10:30:40Z ERROR unexpected processor failure",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 31, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = stake_unstake_results({'container': 'zigchain-monitor'})
+        self.assertFalse(result['ok'])
+        self.assertIn('unexpected processor failure', result['error'])
+
+    def test_mdf_tracker_accepts_startup_and_subscription_logs(self):
+        logs = "\n".join([
+            "2026-10-05T10:35:21.962Z [INFO] [TG] Telegram bot started (polling)",
+            "2026-10-05T10:35:23.311Z [INFO] [WS] Connected",
+            "2026-10-05T10:35:23.312Z [INFO] [WS] Subscribed to MDF create_denom: tm.event='Tx'",
+            "2026-10-05T10:35:23.313Z [INFO] [WS] Subscribed to CreatePairAndProvideLiquidity: tm.event='Tx'",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 36, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = mdf_tracker_results({'container': 'mdf-tracker'})
+        self.assertTrue(result['ok'])
+
+    def test_mdf_tracker_flags_telegram_network_errors(self):
+        logs = "\n".join([
+            "2026-10-05T10:35:21.962Z [INFO] [TG] Telegram bot started (polling)",
+            "2026-10-05T10:35:23.311Z [INFO] [WS] Connected",
+            "2026-10-05T10:35:23.312Z [INFO] [WS] Subscribed to MDF create_denom: tm.event='Tx'",
+            "2026-10-05T10:35:23.313Z [INFO] [WS] Subscribed to CreatePairAndProvideLiquidity: tm.event='Tx'",
+            "2026-10-05T10:58:42.285Z [ERROR] [TG] Cannot reach api.telegram.org - network/DNS issue.",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs):
+            result = mdf_tracker_results({'container': 'mdf-tracker'})
+        self.assertFalse(result['ok'])
+        self.assertIn('Cannot reach api.telegram.org', result['error'])
+
+    def test_highbuy_reconnect_then_subscription_is_healthy(self):
+        logs = "\n".join([
+            "2026-10-05T10:21:29Z WebSocket closed (code=1006). Reconnecting in 1s...",
+            "2026-10-05T10:21:30Z WebSocket connected",
+            "2026-10-05T10:21:31Z Subscription confirmed by RPC",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 22, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = highbuy_monitor_results()
+        self.assertTrue(result['ok'])
+
+    def test_combined_bots_report_survives_docker_api_failure(self):
+        with patch('monitor.reports.docker.from_env', side_effect=RuntimeError('Docker unavailable')):
+            message = collect_bots_report()
+        self.assertIn('Daily Bots Report', message)
+        self.assertIn('Nawa Valdora', message)
+        self.assertIn('TokenX Vault', message)
+        self.assertIn('Check unavailable', message)
+        self.assertLessEqual(len(message), 4096)
+
+    def test_nawa_block_gap_compares_all_three_rpcs(self):
+        logs = '2026-10-05T10:40:00Z processed block height: 12680019\n'
+        heights = iter([12680020, 12680018, 12680045])
+        def rpc_response(*_args, **_kwargs):
+            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {'latest_block_height': str(next(heights))}}})
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_valdora_results()
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['bot_gap'], 26)
+        self.assertIn('26 blocks', result['error'])
+
+    def test_nawa_accepts_three_synced_rpcs(self):
+        logs = '2026-10-05T10:40:00Z processed block height: 12680019\n'
+        heights = iter([12680020, 12680018, 12680021])
+        def rpc_response(*_args, **_kwargs):
+            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {
+                'latest_block_height': str(next(heights)), 'catching_up': False}}})
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_valdora_results()
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['bot_gap'], 2)
+
+    def test_tokenx_flags_backlog_over_500_and_checks_postgres_health(self):
+        lines = []
+        for chain, token, end, latest, backlog in [
+            ('bsc', 'USDT', 125853537, 125853822, 290),
+            ('bsc', 'USDC', 125853515, 125853867, 357),
+            ('ethereum', 'USDT', 26125636, 26125636, 4),
+            ('ethereum', 'USDC', 26125636, 26125636, 501),
+        ]:
+            lines.append(f'2026-10-05T10:41:31Z HTTP backfill {chain} {token} {end-9}-{end-5}; latest={latest}; backlog={backlog+5}')
+            lines.append(f'2026-10-05T10:41:32Z HTTP backfill {chain} {token} {end-4}-{end}; latest={latest}; backlog={backlog}')
+        db = SimpleNamespace(attrs={'State': {'Status': 'running', 'Health': {'Status': 'healthy'}}}, reload=Mock())
+        client = SimpleNamespace(containers=SimpleNamespace(get=Mock(return_value=db)), close=Mock())
+        with patch('monitor.reports._container_logs', return_value='\n'.join(lines)), \
+             patch('monitor.reports.docker.from_env', return_value=client), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 42, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = tokenx_vault_results()
+        self.assertFalse(result['ok'])
+        self.assertIn('backlog 501 exceeds 500', result['error'])
+        self.assertEqual(sum(row['ok'] for row in result['streams']), 3)
+        self.assertEqual(result['postgres'], 'running/healthy')
+
+    def test_usdt_backfill_checks_live_rpc_when_log_is_recent(self):
+        logs = ('2026-10-05T09:40:00Z Last HTTP block: 26077000\n'
+                '2026-10-05T10:40:00Z Last HTTP block: 26077300\n')
+        rpc = SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': hex(26077320)})
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports.requests.post', return_value=rpc), patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = usdt_backfill_results('ETH USDT', {}, 'eth-usdt-telegram-monitor')
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['height'], 26077300)
+        self.assertEqual(result['backlog'], 20)
+
+    def test_usdt_backfill_does_not_compare_old_log_to_live_head(self):
+        logs = '2026-10-05T09:40:00Z Last HTTP block: 26077000\n'
+        with patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports.requests.post') as rpc, patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 41, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = usdt_backfill_results('ETH USDT', {}, 'eth-usdt-telegram-monitor')
+        self.assertIsNone(result['backlog'])
+        rpc.assert_not_called()
+
+    def test_sheets_sync_requires_three_vault_updates_each_hour(self):
+        vaults = ('Stablecoin Yield Vault', 'USDC Opportunistic Credit Vault', 'USDC Core Income Vault')
+        logs = []
+        for hour in (9, 10):
+            logs.append(f'2026-10-05T{hour:02d}:28:18Z Running sync...')
+            logs.extend(f"2026-10-05T{hour:02d}:28:2{index}Z [{vault}] Update today's row (row 157, 2026-10-05) -> in=0 out=0"
+                        for index, vault in enumerate(vaults))
+        with patch('monitor.reports._container_logs', return_value='\n'.join(logs)), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 35, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = sheets_sync_results()
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['updated'], 3)
+        self.assertEqual(result['last_completed'], '15:28 PKT')
+
+    def test_sheets_sync_flags_missing_vault_after_grace_period(self):
+        logs = "\n".join([
+            '2026-10-05T09:28:18Z Running sync...',
+            "2026-10-05T09:28:21Z [Stablecoin Yield Vault] Update today's row (row 177, 2026-10-05) -> in=0 out=0",
+            "2026-10-05T09:28:22Z [USDC Opportunistic Credit Vault] Update today's row (row 157, 2026-10-05) -> in=0 out=0",
+            "2026-10-05T09:28:23Z [USDC Core Income Vault] Update today's row (row 154, 2026-10-05) -> in=0 out=0",
+            '2026-10-05T10:28:18Z Running sync...',
+            "2026-10-05T10:28:21Z [Stablecoin Yield Vault] Update today's row (row 177, 2026-10-05) -> in=0 out=0",
+        ])
+        with patch('monitor.reports._container_logs', return_value=logs), patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 35, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = sheets_sync_results()
+        self.assertFalse(result['ok'])
+        self.assertIn('USDC Core Income Vault', result['error'])
+
+    def test_sheets_sync_flags_missed_hour(self):
+        vaults = ('Stablecoin Yield Vault', 'USDC Opportunistic Credit Vault', 'USDC Core Income Vault')
+        logs = []
+        for hour in (8, 10):
+            logs.append(f'2026-10-05T{hour:02d}:28:18Z Running sync...')
+            logs.extend(f"2026-10-05T{hour:02d}:28:2{index}Z [{vault}] Update today's row (row 157, 2026-10-05) -> in=0 out=0"
+                        for index, vault in enumerate(vaults))
+        with patch('monitor.reports._container_logs', return_value='\n'.join(logs)), \
+             patch('monitor.reports.datetime') as dt:
+            dt.now.return_value = datetime(2026, 10, 5, 10, 35, tzinfo=ZoneInfo('UTC'))
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = sheets_sync_results()
+        self.assertFalse(result['ok'])
+        self.assertIn('120m apart', result['error'])
+
+    def test_watchman_collector_ignores_old_single_rpc_timeout(self):
+        logs = "\n".join([
+            "2026-10-05T11:58:42+02:00 vmi python[1]: RPC [http://internal-bots-rpc.wickhub.cc] failed: Connection timed out",
+            "2026-10-05T12:48:29+02:00 vmi python[1]: Reloaded 5329 wallets from DB",
+            "2026-10-05T12:53:29+02:00 vmi python[1]: Reloaded 5329 wallets from DB",
+        ])
+        result = watchman_activity(logs, datetime(2026, 10, 5, 10, 54, tzinfo=timezone.utc))
+        self.assertEqual(result['wallet_count'], 5329)
+        self.assertEqual(result['rpc_failures_10m'], 0)
+
+    def test_watchman_collector_counts_repeated_rpc_failures(self):
+        logs = "\n".join(
+            f"2026-10-05T12:{minute}:00+02:00 vmi python[1]: RPC [http://internal-bots-rpc.wickhub.cc] failed: timeout"
+            for minute in ('51', '52', '53')
+        )
+        result = watchman_activity(logs, datetime(2026, 10, 5, 10, 54, tzinfo=timezone.utc))
+        self.assertEqual(result['rpc_failures_10m'], 3)
+
+    def test_systemd_check_alerts_on_repeated_rpc_failure_but_not_single_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / 'systemd-status.json'
+            snapshot = {'updated_at': datetime.now(timezone.utc).isoformat(), 'services': {
+                'wallet-watchman.service': {'active_state': 'active', 'sub_state': 'running', 'activity': {
+                    'last_reload_at': (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(),
+                    'wallet_count': 5329, 'rpc_failures_10m': 1}},
+            }}
+            status_path.write_text(json.dumps(snapshot), encoding='utf-8')
+            config = {'services': [{'name': 'wallet-watchman', 'unit': 'wallet-watchman.service'}]}
+            self.assertEqual(systemd_checks(config, str(status_path)), [])
+            snapshot['services']['wallet-watchman.service']['activity']['rpc_failures_10m'] = 3
+            status_path.write_text(json.dumps(snapshot), encoding='utf-8')
+            findings = systemd_checks(config, str(status_path))
+            self.assertEqual([item['type'] for item in findings], ['SYSTEMD_RPC_FAILURE'])
+
+    def test_systemd_check_rejects_stale_collector_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / 'systemd-status.json'
+            status_path.write_text(json.dumps({'updated_at': (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat(),
+                                               'services': {}}), encoding='utf-8')
+            findings = systemd_checks({'services': []}, str(status_path))
+        self.assertEqual(findings[0]['type'], 'SYSTEMD_COLLECTOR_MISSING')
+
+    def test_systemd_check_flags_watchman_when_reload_stops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / 'systemd-status.json'
+            snapshot = {'updated_at': datetime.now(timezone.utc).isoformat(), 'services': {
+                'wallet-watchman.service': {'active_state': 'active', 'sub_state': 'running', 'activity': {
+                    'last_reload_at': (datetime.now(timezone.utc) - timedelta(minutes=16)).isoformat(),
+                    'wallet_count': 5329, 'rpc_failures_10m': 0}},
+            }}
+            status_path.write_text(json.dumps(snapshot), encoding='utf-8')
+            findings = systemd_checks({'services': [{'name': 'wallet-watchman', 'unit': 'wallet-watchman.service'}]}, str(status_path))
+        self.assertEqual([item['type'] for item in findings], ['SYSTEMD_ACTIVITY_STALE'])
+
+    def test_rpc_failure_incident_fingerprint_ignores_count(self):
+        self.assertEqual(
+            fingerprint('wallet-monitor', 'wallet-watchman', 'SYSTEMD_RPC_FAILURE', '3 RPC failures in 10 minutes'),
+            fingerprint('wallet-monitor', 'wallet-watchman', 'SYSTEMD_RPC_FAILURE', '4 RPC failures in 10 minutes'),
+        )
+
+    def test_system_service_report_uses_host_snapshot(self):
+        snapshot = {'services': {
+            'wallet-watchman.service': {'active_state': 'active', 'sub_state': 'running', 'activity': {
+                'last_reload_at': (datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat(),
+                'wallet_count': 5329, 'rpc_failures_10m': 1}},
+            'zigchain-exporter.service': {'active_state': 'active', 'sub_state': 'running'},
+        }}
+        with patch('monitor.reports.read_systemd_snapshot', return_value=snapshot):
+            result = system_service_results()
+        self.assertTrue(result['ok'])
+        self.assertIn('5329 wallets', result['services'][0]['summary'])
+        self.assertIn('metrics not verified', result['services'][1]['summary'])
+
+    def test_system_service_report_flags_empty_exporter_endpoint(self):
+        snapshot = {'services': {
+            'wallet-watchman.service': {'active_state': 'active', 'sub_state': 'running', 'activity': {
+                'last_reload_at': datetime.now(timezone.utc).isoformat(), 'wallet_count': 5329, 'rpc_failures_10m': 0}},
+            'zigchain-exporter.service': {'active_state': 'active', 'sub_state': 'running'},
+        }}
+        response = SimpleNamespace(raise_for_status=Mock(), text='')
+        with patch('monitor.reports.read_systemd_snapshot', return_value=snapshot), \
+             patch('monitor.reports.requests.get', return_value=response):
+            result = system_service_results({'exporter_metrics_url': 'http://127.0.0.1:9100/metrics'})
+        self.assertFalse(result['ok'])
+        self.assertIn('empty response', result['services'][1]['error'])
 
 
 if __name__ == '__main__':

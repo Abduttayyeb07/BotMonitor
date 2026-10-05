@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import json
 import logging
 import sqlite3
 import threading
@@ -14,7 +13,8 @@ from contextlib import closing
 import docker
 import requests
 from .docker_checks import inventory
-from .reports import frontend_endpoint_results, frontend_report_items, frontend_report_message
+from .checks import read_systemd_snapshot
+from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message
 
 log = logging.getLogger(__name__)
 
@@ -55,13 +55,14 @@ def uptime(started_at: str | None) -> str:
 
 
 class TelegramBotPanel:
-    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False, database_path: str = '/data/incidents.db', frontend_report_config: dict[str, Any] | None = None):
+    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False, database_path: str = '/data/incidents.db', frontend_report_config: dict[str, Any] | None = None, bot_report_config: dict[str, Any] | None = None):
         self.token = token
         self.allowed_chat_ids = set(allowed_chat_ids)
         self.projects = projects or {}
         self.allow_restart = allow_restart
         self.database_path = database_path
         self.frontend_report_config = frontend_report_config or {}
+        self.bot_report_config = bot_report_config or {}
         self.inventory_cache = {}
         self.inventory_at = 0.0
         self.stop_event = threading.Event()
@@ -160,6 +161,7 @@ class TelegramBotPanel:
                 "/services — system services\n"
                 "/incidents — active incidents\n"
                 "/frontendhealth — frontend health report\n"
+                "/botshealth — bot health report\n"
                 "/help — show this help")
 
     def active_incidents_text(self) -> str:
@@ -188,12 +190,16 @@ class TelegramBotPanel:
             {"command": "services", "description": "Show system services"},
             {"command": "incidents", "description": "Show active incidents"},
             {"command": "frontendhealth", "description": "Show frontend health report"},
+            {"command": "botshealth", "description": "Show bot health report"},
             {"command": "help", "description": "Show available commands"},
         ]}, timeout=15)
 
     def frontend_health_report_text(self) -> str:
         items = frontend_report_items(self.frontend_report_config, self.projects)
         return frontend_report_message(frontend_endpoint_results(items))
+
+    def bots_health_report_text(self) -> str:
+        return collect_bots_report(self.bot_report_config)
 
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:
         group = self.projects.get(group_id, {})
@@ -229,9 +235,8 @@ class TelegramBotPanel:
 
     def systemd_status(self, unit: str) -> dict[str, Any]:
         try:
-            with open("/data/systemd-status.json", encoding="utf-8") as handle:
-                return json.load(handle).get("services", {}).get(unit, {})
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return read_systemd_snapshot("/data/systemd-status.json").get("services", {}).get(unit, {})
+        except (OSError, ValueError, KeyError, TypeError):
             return {}
 
     def incident_history(self, project_name: str, services: list[str] | None = None) -> tuple[int, int, int]:
@@ -408,12 +413,17 @@ class TelegramBotPanel:
         service = services[index]
         details = self.systemd_status(service["unit"])
         status = details.get("active_state", "unknown")
-        logs = details.get("recent_logs", "No recent journal logs.")
+        logs = (details.get("recent_logs") or "No recent journal logs.")[-2500:]
         icon = "🟢" if status == "active" else "🔴"
         text = (f"{icon} <b>{esc(service['name'])}</b>\n\n"
                 f"<b>Unit:</b> <code>{esc(service['unit'])}</code>\n"
                 f"<b>Status:</b> {esc(status.upper())}\n\n"
                 f"<b>Recent journal</b>\n<pre>{esc(logs)}</pre>")
+        if service["unit"] == "wallet-watchman.service":
+            activity = details.get("activity") or {}
+            text += (f"\n\n<b>Wallets:</b> {esc(activity.get('wallet_count') or 'unknown')}"
+                     f"\n<b>Last reload:</b> {esc(activity.get('last_reload_at') or 'unknown')}"
+                     f"\n<b>RPC failures (10m):</b> {esc(activity.get('rpc_failures_10m') or 0)}")
         return text, [[{"text": "🔄 Refresh", "callback_data": f"service:{group_id}:{project_id}:{index}"}],
                       [{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}]]
 
@@ -444,6 +454,8 @@ class TelegramBotPanel:
                 self.send(chat_id, self.active_incidents_text())
             elif command in {"/frontendhealth", "/frontendreport"}:
                 self.send(chat_id, self.frontend_health_report_text())
+            elif command in {"/botshealth", "/botsreport", "/zigwhalehealth", "/zigwhale"}:
+                self.send(chat_id, self.bots_health_report_text())
             elif command == "/help":
                 self.send(chat_id, self.command_help())
             return
