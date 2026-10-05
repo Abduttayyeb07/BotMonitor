@@ -7,8 +7,11 @@ from unittest.mock import Mock, patch
 from monitor.config import load_config
 from monitor.docker_checks import checks, inventory
 from monitor.incident_store import IncidentStore, fingerprint
+from monitor.reports import frontend_report_message, should_send_daily_report
 from monitor.service import collapse_project_failures, OutageWindow
 from monitor.telegram_bot import TelegramBotPanel
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 class MonitoringRegressionTests(unittest.TestCase):
@@ -103,6 +106,23 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertEqual(protected, {'a'})
         with patch('monitor.service.time.monotonic', return_value=11):
             self.assertEqual(window.apply([finding], {'project_correlation_seconds': 10})[0], [finding])
+
+    def test_frontend_report_message_uses_html_sections(self):
+        message = frontend_report_message([
+            {'name': 'Good App', 'url': 'http://ok', 'ok': True, 'status_code': 200, 'response_ms': 12, 'error': ''},
+            {'name': 'Bad App', 'url': 'http://bad', 'ok': False, 'status_code': 'error', 'response_ms': 5000, 'error': 'timeout'},
+        ], datetime(2026, 10, 5, 9, 0, tzinfo=ZoneInfo('Asia/Karachi')))
+        self.assertIn('<b>Daily Frontend Report</b>', message)
+        self.assertIn('<pre>', message)
+        self.assertIn('1/2 online', message)
+        self.assertIn('Bad App', message)
+
+    def test_daily_report_is_sent_once_after_configured_time(self):
+        before = datetime(2026, 10, 5, 8, 59, tzinfo=ZoneInfo('Asia/Karachi'))
+        after = datetime(2026, 10, 5, 9, 0, tzinfo=ZoneInfo('Asia/Karachi'))
+        self.assertEqual(should_send_daily_report(before, '09:00', None), (False, '2026-10-05'))
+        self.assertEqual(should_send_daily_report(after, '09:00', None), (True, '2026-10-05'))
+        self.assertEqual(should_send_daily_report(after, '09:00', '2026-10-05'), (False, '2026-10-05'))
 
 
 if __name__ == '__main__':
