@@ -135,7 +135,9 @@ def main() -> None:
                                 chat_ids,
                                 telegram_config.get("enabled", True))
     panel = TelegramBotPanel(env(telegram_config.get("bot_token_env", "TELEGRAM_BOT_TOKEN")), chat_ids,
-                             config.get("projects", {}), config.get("allow_container_restart", False), config.get('database_path', 'data/incidents.db'))
+                             config.get("projects", {}), config.get("allow_container_restart", False),
+                             config.get('database_path', 'data/incidents.db'),
+                             config.get("daily_reports", {}).get("frontend", {}))
     running = True
     def stop(_signum, _frame):
         nonlocal running

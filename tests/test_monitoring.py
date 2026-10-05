@@ -124,6 +124,14 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertEqual(should_send_daily_report(after, '09:00', None), (True, '2026-10-05'))
         self.assertEqual(should_send_daily_report(after, '09:00', '2026-10-05'), (False, '2026-10-05'))
 
+    def test_frontend_health_command_sends_report(self):
+        panel = TelegramBotPanel(None, ['1'], {}, frontend_report_config={'items': [{'name': 'Frontend', 'health_url': 'http://ok'}]})
+        with patch('monitor.telegram_bot.frontend_endpoint_results', return_value=[
+            {'name': 'Frontend', 'url': 'http://ok', 'ok': True, 'status_code': 200, 'response_ms': 5, 'error': ''},
+        ]), patch.object(panel, 'send') as send:
+            panel.handle({'message': {'chat': {'id': 1}, 'text': '/frontendhealth'}})
+        self.assertIn('Daily Frontend Report', send.call_args.args[1])
+
 
 if __name__ == '__main__':
     unittest.main()

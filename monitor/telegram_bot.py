@@ -14,6 +14,7 @@ from contextlib import closing
 import docker
 import requests
 from .docker_checks import inventory
+from .reports import frontend_endpoint_results, frontend_report_message
 
 log = logging.getLogger(__name__)
 
@@ -54,12 +55,13 @@ def uptime(started_at: str | None) -> str:
 
 
 class TelegramBotPanel:
-    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False, database_path: str = '/data/incidents.db'):
+    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False, database_path: str = '/data/incidents.db', frontend_report_config: dict[str, Any] | None = None):
         self.token = token
         self.allowed_chat_ids = set(allowed_chat_ids)
         self.projects = projects or {}
         self.allow_restart = allow_restart
         self.database_path = database_path
+        self.frontend_report_config = frontend_report_config or {}
         self.inventory_cache = {}
         self.inventory_at = 0.0
         self.stop_event = threading.Event()
@@ -157,6 +159,7 @@ class TelegramBotPanel:
                 "/docker or /bots — Docker bot projects\n"
                 "/services — system services\n"
                 "/incidents — active incidents\n"
+                "/frontendhealth — frontend health report\n"
                 "/help — show this help")
 
     def active_incidents_text(self) -> str:
@@ -184,8 +187,13 @@ class TelegramBotPanel:
             {"command": "docker", "description": "Show Docker bot projects"},
             {"command": "services", "description": "Show system services"},
             {"command": "incidents", "description": "Show active incidents"},
+            {"command": "frontendhealth", "description": "Show frontend health report"},
             {"command": "help", "description": "Show available commands"},
         ]}, timeout=15)
+
+    def frontend_health_report_text(self) -> str:
+        items = self.frontend_report_config.get("items") or self.projects.get("frontend", {}).get("items", [])
+        return frontend_report_message(frontend_endpoint_results(items))
 
     def project_keyboard(self, group_id: str) -> list[list[dict[str, str]]]:
         group = self.projects.get(group_id, {})
@@ -434,6 +442,8 @@ class TelegramBotPanel:
                 self.send(chat_id, text, keyboard)
             elif command == "/incidents":
                 self.send(chat_id, self.active_incidents_text())
+            elif command in {"/frontendhealth", "/frontendreport"}:
+                self.send(chat_id, self.frontend_health_report_text())
             elif command == "/help":
                 self.send(chat_id, self.command_help())
             return
