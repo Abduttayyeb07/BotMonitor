@@ -5,6 +5,7 @@ import html
 import json
 import os
 import signal
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,7 @@ from .config import env, load_config
 from .docker_checks import checks as docker_checks, log_checks, snapshot as docker_snapshot
 from .incident_store import IncidentStore, fingerprint
 from .notifier import TelegramNotifier
+from .removals import apply_removals, removed_keys
 from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message, should_send_daily_report
 from .telegram_bot import TelegramBotPanel
 
@@ -123,9 +125,23 @@ class OutageWindow:
         return [item for item in findings if not (item['project'] in held and item['type'] == 'CONTAINER_DOWN')], protected
 
 
+def discard_removed(store: IncidentStore, config: dict) -> None:
+    """Silently close open incidents of removed items; no recovery message is sent."""
+    scope = config.get("_removed")
+    if scope:
+        closed = store.discard(scope["projects"], scope["containers"], scope["services"])
+        if closed:
+            log.info("closed %s open incident(s) for items removed from monitoring", closed)
+
+
 def main() -> None:
-    config = load_config(os.getenv("MONITOR_CONFIG", "config.yaml"))
-    store = IncidentStore(config.get("database_path", "data/incidents.db"))
+    base_config = load_config(os.getenv("MONITOR_CONFIG", "config.yaml"))
+    database_path = base_config.get("database_path", "data/incidents.db")
+    store = IncidentStore(database_path)
+    # Items removed from the Telegram menu stay out of every check and report.
+    applied_removals = removed_keys(database_path)
+    config = apply_removals(base_config, applied_removals)
+    discard_removed(store, config)
     telegram_config = config.get("telegram", {})
     chat_ids_value = env(telegram_config.get("chat_ids_env", "TELEGRAM_CHAT_IDS"))
     if not chat_ids_value:
@@ -138,7 +154,7 @@ def main() -> None:
                              config.get("projects", {}), config.get("allow_container_restart", False),
                              config.get('database_path', 'data/incidents.db'),
                              config.get("daily_reports", {}).get("frontend", {}),
-                             config.get("bot_reports", {}))
+                             config.get("bot_reports", {}), base_config=base_config)
     running = True
     def stop(_signum, _frame):
         nonlocal running
@@ -167,6 +183,19 @@ def main() -> None:
     while running:
         cycle_started = time.monotonic()
         poll_number += 1
+        try:
+            current_removals = removed_keys(database_path)
+        except sqlite3.Error:
+            current_removals = applied_removals
+        if current_removals != applied_removals:
+            applied_removals = current_removals
+            config = apply_removals(base_config, applied_removals)
+            report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True})
+            bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True})
+            discard_removed(store, config)
+            log.info("monitoring list changed: removed_items=%s docker_containers=%s systemd_services=%s",
+                     len(applied_removals), len(config.get("docker", {}).get("containers") or []),
+                     len(config.get("systemd", {}).get("services") or []))
         active = []
         findings = host_checks(config.get("thresholds", {}))
         findings += docker_checks(config.get("docker", {}))

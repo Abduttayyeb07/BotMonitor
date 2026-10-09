@@ -591,6 +591,112 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertIn('empty response', result['services'][1]['error'])
 
+    # --- Remove from monitoring -------------------------------------------------
+
+    @staticmethod
+    def removal_config():
+        return {
+            'docker': {'containers': [
+                {'name': 'web', 'project': 'site', 'health_url': 'http://x'},
+                {'name': 'db', 'project': 'site'},
+                {'name': 'zig-whale-bot', 'project': 'marketzig'},
+            ]},
+            'systemd': {'services': [
+                {'name': 'wallet-watchman', 'project': 'wallet-monitor', 'unit': 'wallet-watchman.service'},
+                {'name': 'zigchain-exporter', 'project': 'zigchain-exporter', 'unit': 'zigchain-exporter.service'},
+            ]},
+            'daily_reports': {'frontend': {'enabled': True, 'items': [
+                {'id': 'site', 'name': 'Site', 'health_url': 'http://x'}]}},
+            'projects': {
+                'frontend': {'items': [{'id': 'site', 'name': 'Site', 'containers': ['web', 'db']}]},
+                'bots_docker': {'items': [{'id': 'marketzig', 'name': 'Whale', 'containers': ['zig-whale-bot']}]},
+                'bots_systemd': {'items': [{'id': 'system-services', 'name': 'System Services', 'services': [
+                    {'name': 'wallet-watchman', 'unit': 'wallet-watchman.service'},
+                    {'name': 'zigchain-exporter', 'unit': 'zigchain-exporter.service'}]}]},
+            },
+            'bot_reports': {'zig_whale': {'container': 'zig-whale-bot'}},
+        }
+
+    def test_removed_frontend_project_leaves_every_check_and_report(self):
+        from monitor.removals import apply_removals, project_key
+        base = self.removal_config()
+        config = apply_removals(base, {project_key('frontend', 'site')})
+        self.assertEqual([c['name'] for c in config['docker']['containers']], ['zig-whale-bot'])
+        self.assertEqual(config['projects']['frontend']['items'], [])
+        self.assertEqual(config['daily_reports']['frontend']['items'], [])
+        self.assertFalse(config['daily_reports']['frontend']['enabled'])
+        self.assertEqual(frontend_report_items(config['daily_reports']['frontend'], config['projects']), [])
+        self.assertEqual(len(base['docker']['containers']), 3, 'base config must stay untouched')
+
+    def test_removed_docker_bot_is_dropped_from_bots_report(self):
+        from monitor.removals import apply_removals, project_key
+        config = apply_removals(self.removal_config(), {project_key('bots_docker', 'marketzig')})
+        self.assertFalse(config['bot_reports']['zig_whale']['enabled'])
+        with patch('monitor.reports.zig_whale_exchange_results') as whale:
+            message = collect_bots_report({**config['bot_reports'], **{
+                key: {'enabled': False} for key in ('zig_usd_alerts', 'wallet_monitor', 'zigchain_bot', 'stake_unstake',
+                                                    'mdf_tracker', 'highbuy_monitor', 'nawa_valdora', 'tokenx_vault',
+                                                    'bep20_usdt', 'eth_usdt', 'sheets_sync', 'system_services')}})
+        whale.assert_not_called()
+        self.assertIn('No bots are being monitored', message)
+        self.assertNotIn('Zig Whale', message)
+
+    def test_removed_system_service_is_dropped_from_checks_and_report(self):
+        from monitor.removals import apply_removals, service_key
+        config = apply_removals(self.removal_config(), {service_key('bots_systemd', 'system-services', 'wallet-watchman')})
+        self.assertEqual([s['name'] for s in config['systemd']['services']], ['zigchain-exporter'])
+        self.assertEqual([s['name'] for s in config['projects']['bots_systemd']['items'][0]['services']], ['zigchain-exporter'])
+        snapshot = {'services': {'zigchain-exporter.service': {'active_state': 'active', 'sub_state': 'running'}}}
+        with patch('monitor.reports.read_systemd_snapshot', return_value=snapshot):
+            result = system_service_results(config['bot_reports']['system_services'])
+        self.assertEqual([row['name'] for row in result['services']], ['Zigchain Exporter'])
+        both = apply_removals(self.removal_config(), {service_key('bots_systemd', 'system-services', n) for n in ('wallet-watchman', 'zigchain-exporter')})
+        self.assertEqual(both['projects']['bots_systemd']['items'], [])
+        self.assertFalse(both['bot_reports']['system_services']['enabled'])
+
+    def test_discard_closes_removed_incidents_silently_without_touching_others(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = IncidentStore(str(Path(directory) / 'incidents.db'))
+            for project, service, kind in (('site', 'web', 'CONTAINER_DOWN'), ('site', 'site-project', 'PROJECT_DOWN'),
+                                           ('wallet-monitor', 'wallet-watchman', 'SYSTEMD_DOWN'),
+                                           ('wallet-monitor', 'wallet-monitor', 'CONTAINER_DOWN')):
+                store.observe(fingerprint(project, service, kind, kind), project, service, kind, 'CRITICAL', kind, 0)
+            closed = store.discard({'site'}, {'web'}, {'wallet-watchman'})
+            self.assertEqual(closed, 3)
+            still_open = [row['service'] for row in store.db.execute("SELECT service FROM incidents WHERE status='OPEN'")]
+            self.assertEqual(still_open, ['wallet-monitor'])
+            self.assertEqual(store.db.execute('SELECT COUNT(*) FROM recovery_queue').fetchone()[0], 0)
+            store.db.close()
+
+    def test_panel_remove_persists_hides_item_and_can_restore(self):
+        base = self.removal_config()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            panel = TelegramBotPanel(None, ['1'], base['projects'], database_path=path, base_config=base)
+            text, keyboard = panel.remove_confirm_page('frontend', 'site')
+            self.assertIn('Remove from monitoring?', text)
+            self.assertIn('rm:frontend:site', keyboard[0][0]['callback_data'])
+            panel.remove_item('frontend', 'site')
+            self.assertEqual(panel.projects['frontend']['items'], [])
+            # A fresh panel (monitor restart) still sees the removal.
+            restarted = TelegramBotPanel(None, ['1'], base['projects'], database_path=path, base_config=base)
+            restarted.refresh()
+            self.assertEqual(restarted.projects['frontend']['items'], [])
+            text, keyboard = restarted.removed_page()
+            self.assertIn('Site', text)
+            restarted.restore(int(keyboard[0][0]['callback_data'].split(':')[1]))
+            self.assertEqual(len(restarted.projects['frontend']['items']), 1)
+
+    def test_panel_remove_service_uses_name_not_position(self):
+        base = self.removal_config()
+        with tempfile.TemporaryDirectory() as directory:
+            panel = TelegramBotPanel(None, ['1'], base['projects'], database_path=str(Path(directory) / 'incidents.db'), base_config=base)
+            panel.remove_item('bots_systemd', 'system-services', 'wallet-watchman')
+            names = [s['name'] for s in panel.projects['bots_systemd']['items'][0]['services']]
+            self.assertEqual(names, ['zigchain-exporter'])
+            text, _ = panel.remove_item('bots_systemd', 'system-services', 'wallet-watchman')
+            self.assertIn('Item not found', text)
+
 
 if __name__ == '__main__':
     unittest.main()

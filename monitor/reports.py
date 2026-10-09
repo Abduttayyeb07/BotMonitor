@@ -82,6 +82,9 @@ def frontend_report_items(config: dict[str, Any], projects: dict[str, Any] | Non
         elif item.get("health_url"):
             resolved.append(_normalize_frontend_url(item))
 
+    # An existing frontend group with every project removed means "monitor nothing".
+    if not resolved and (projects or {}).get("frontend") is not None:
+        return []
     return resolved or DEFAULT_FRONTEND_REPORT_ITEMS
 
 
@@ -729,6 +732,7 @@ def sheets_sync_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def system_service_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
+    disabled = set(config.get("disabled_units") or [])
     try:
         snapshot = read_systemd_snapshot(config.get("status_path", "/data/systemd-status.json"),
                                          int(config.get("collector_max_age_seconds", 60)))
@@ -736,7 +740,8 @@ def system_service_results(config: dict[str, Any] | None = None) -> dict[str, An
         error = f"Host collector unavailable: {type(exc).__name__}: {exc}"[:200]
         return {"name": "System Services", "ok": False, "services": [
             {"name": name, "ok": False, "summary": "collector unavailable", "error": error}
-            for name in ("Wallet Watchman", "Zigchain Exporter")], "error": error}
+            for name, unit in (("Wallet Watchman", "wallet-watchman.service"), ("Zigchain Exporter", "zigchain-exporter.service"))
+            if unit not in disabled], "error": error}
 
     services = snapshot.get("services", {})
     watchman = services.get("wallet-watchman.service") or {}
@@ -780,7 +785,8 @@ def system_service_results(config: dict[str, Any] | None = None) -> dict[str, An
                     "systemd running; endpoint failed" if exporter_active else "systemd not running"),
         "error": "zigchain-exporter.service is not running" if not exporter_active else metrics_error,
     }
-    rows = [watchman_row, exporter_row]
+    rows = [row for row, unit in ((watchman_row, "wallet-watchman.service"), (exporter_row, "zigchain-exporter.service"))
+            if unit not in disabled]
     return {"name": "System Services", "ok": all(row["ok"] for row in rows),
             "services": rows, "error": "; ".join(row["error"] for row in rows if row["error"])}
 
@@ -796,30 +802,35 @@ def collect_bots_report(config: dict[str, Any] | None = None) -> str:
             log.warning("bots report check failed: %s (%s: %s)", name, type(exc).__name__, exc)
             return {"name": name, "ok": False, "error": f"Check unavailable: {type(exc).__name__}: {exc}"[:300]}
 
-    specs = [
-        ("Zig USD Only Alerts", zig_usd_alerts_results, config.get("zig_usd_alerts", {})),
-        ("Wallet Monitor", wallet_monitor_results, config.get("wallet_monitor", {})),
-        ("Zigchain Bot", zigchain_bot_results, config.get("zigchain_bot", {})),
-        ("Stake Unstake", stake_unstake_results, config.get("stake_unstake", {})),
-        ("MDF Tracker", mdf_tracker_results, config.get("mdf_tracker", {})),
-        ("HighBuy Monitor", highbuy_monitor_results, config.get("highbuy_monitor", {})),
-        ("Nawa Valdora", nawa_valdora_results, config.get("nawa_valdora", {})),
-        ("TokenX Vault", tokenx_vault_results, config.get("tokenx_vault", {})),
-        ("BEP20 USDT", usdt_backfill_results, "BEP20 USDT", config.get("bep20_usdt", {}), DEFAULT_BEP20_CONTAINER),
-        ("ETH USDT", usdt_backfill_results, "ETH USDT", config.get("eth_usdt", {}), DEFAULT_ETH_USDT_CONTAINER),
-        ("Sheets Sync", sheets_sync_results, config.get("sheets_sync", {})),
-        ("System Services", system_service_results, config.get("system_services", {})),
-    ]
+    # Sections removed from monitoring carry enabled=False and are left out entirely.
+    specs = {
+        "zig_usd_alerts": ("Zig USD Only Alerts", zig_usd_alerts_results, config.get("zig_usd_alerts", {})),
+        "wallet_monitor": ("Wallet Monitor", wallet_monitor_results, config.get("wallet_monitor", {})),
+        "zigchain_bot": ("Zigchain Bot", zigchain_bot_results, config.get("zigchain_bot", {})),
+        "stake_unstake": ("Stake Unstake", stake_unstake_results, config.get("stake_unstake", {})),
+        "mdf_tracker": ("MDF Tracker", mdf_tracker_results, config.get("mdf_tracker", {})),
+        "highbuy_monitor": ("HighBuy Monitor", highbuy_monitor_results, config.get("highbuy_monitor", {})),
+        "nawa_valdora": ("Nawa Valdora", nawa_valdora_results, config.get("nawa_valdora", {})),
+        "tokenx_vault": ("TokenX Vault", tokenx_vault_results, config.get("tokenx_vault", {})),
+        "bep20_usdt": ("BEP20 USDT", usdt_backfill_results, "BEP20 USDT", config.get("bep20_usdt", {}), DEFAULT_BEP20_CONTAINER),
+        "eth_usdt": ("ETH USDT", usdt_backfill_results, "ETH USDT", config.get("eth_usdt", {}), DEFAULT_ETH_USDT_CONTAINER),
+        "sheets_sync": ("Sheets Sync", sheets_sync_results, config.get("sheets_sync", {})),
+        "system_services": ("System Services", system_service_results, config.get("system_services", {})),
+    }
+    enabled = {key: spec for key, spec in specs.items() if (config.get(key) or {}).get("enabled", True)}
     with ThreadPoolExecutor(max_workers=8) as pool:
-        whale_future = pool.submit(zig_whale_exchange_results, config.get("zig_whale", {}))
-        jobs = [pool.submit(check, *spec) for spec in specs]
-        results = [job.result() for job in jobs]
-        try:
-            whale = whale_future.result()
-        except Exception as exc:
-            log.warning("bots report check failed: Zig Whale (%s: %s)", type(exc).__name__, exc)
-            whale = [{"exchange": exchange, "ok": False, "error": f"Check unavailable: {type(exc).__name__}: {exc}"[:300]}
-                     for exchange in DEFAULT_ZIG_WHALE_EXCHANGES]
+        whale_future = (pool.submit(zig_whale_exchange_results, config.get("zig_whale", {}))
+                        if (config.get("zig_whale") or {}).get("enabled", True) else None)
+        jobs = {key: pool.submit(check, *spec) for key, spec in enabled.items()}
+        results = [jobs[key].result() if key in jobs else None for key in specs]
+        whale = []
+        if whale_future is not None:
+            try:
+                whale = whale_future.result()
+            except Exception as exc:
+                log.warning("bots report check failed: Zig Whale (%s: %s)", type(exc).__name__, exc)
+                whale = [{"exchange": exchange, "ok": False, "error": f"Check unavailable: {type(exc).__name__}: {exc}"[:300]}
+                         for exchange in DEFAULT_ZIG_WHALE_EXCHANGES]
     return bots_report_message(whale, *results)
 
 
@@ -880,7 +891,8 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
     generated_at = generated_at or datetime.now(PKT)
     zig_ok = sum(1 for item in zig_whale_results if item["ok"])
     zig_total = len(zig_whale_results)
-    bot_checks = [{"name": "Zig Whale Bot", "ok": zig_ok == zig_total, "summary": f"{zig_ok}/{zig_total} exchanges fresh"}]
+    bot_checks = ([{"name": "Zig Whale Bot", "ok": zig_ok == zig_total, "summary": f"{zig_ok}/{zig_total} exchanges fresh"}]
+                  if zig_total else [])
     if zig_usd_results is not None:
         age = "missing" if zig_usd_results.get("age_seconds") is None else f"{zig_usd_results['age_seconds']}s ago"
         bot_checks.append({"name": "Zig USD Only Alerts", "ok": zig_usd_results["ok"], "summary": f"last TX processing {age}"})
@@ -930,6 +942,8 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
     ok_count = sum(1 for item in bot_checks if item["ok"])
     failed = len(bot_checks) - ok_count
     status_line = "All bot checks healthy" if failed == 0 else f"{failed} bot check(s) need attention"
+    if not bot_checks:
+        status_line = "No bots are being monitored"
 
     lines = [
         "🤖 <b>Daily Bots Report</b>",
@@ -943,21 +957,19 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
         "<pre>" + html.escape("\n".join(
             f"{_status_icon(item['ok'])} {item['name']}: {item['summary']}" for item in bot_checks
         )) + "</pre>",
-        "",
-        "— <b>Zig Whale Exchanges</b> —",
-        "",
     ]
 
-    rows = []
-    for item in zig_whale_results:
-        age = "missing" if item.get("age_seconds") is None else f"{item['age_seconds']}s ago"
-        rows.append(
-            f"{_status_icon(item['ok'])} {item['exchange']}\n"
-            f"Last data: {age}\n"
-            f"Largest buy: {item.get('largest_buy', '-')}\n"
-            f"24h volume: {item.get('volume', '-')}"
-        )
-    lines.append("<pre>" + html.escape("\n\n".join(rows)) + "</pre>")
+    if zig_whale_results:
+        rows = []
+        for item in zig_whale_results:
+            age = "missing" if item.get("age_seconds") is None else f"{item['age_seconds']}s ago"
+            rows.append(
+                f"{_status_icon(item['ok'])} {item['exchange']}\n"
+                f"Last data: {age}\n"
+                f"Largest buy: {item.get('largest_buy', '-')}\n"
+                f"24h volume: {item.get('volume', '-')}"
+            )
+        lines.extend(["", "— <b>Zig Whale Exchanges</b> —", "", "<pre>" + html.escape("\n\n".join(rows)) + "</pre>"])
 
     if nawa_results is not None:
         rpc_rows = [f"Internal RPC: {nawa_results.get('height') or '-'}  Max gap: {nawa_results.get('internal_gap') if nawa_results.get('internal_gap') is not None else '-'}"]

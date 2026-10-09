@@ -81,6 +81,18 @@ TELEGRAM_CHAT_IDS=123456789,-1001234567890
 
 Never commit `config.yaml`, `.env`, tokens, or credentials.
 
+## Removing items from monitoring
+
+Open any frontend project, Docker bot project, or system service in the
+Telegram menu and press **🗑 Remove from monitoring**, then confirm. The item
+is dropped from container/systemd/health checks, outage grouping, the menus,
+and the Frontend and Bots reports, and its open incidents are closed without a
+recovery message. The monitored application itself is never touched.
+
+Removals are stored in SQLite (`removed_items`), so they survive restarts and
+work even though `config.yaml` is mounted read-only. `config.yaml` is not
+edited. Use `/removed` to list removed items and restore any of them.
+
 ## Outage detection
 
 Configured containers that are removed (including `docker compose down`) count

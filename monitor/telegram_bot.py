@@ -14,6 +14,7 @@ import docker
 import requests
 from .docker_checks import inventory
 from .checks import read_systemd_snapshot
+from .removals import apply_removals, project_key, remove_item, removed_items, removed_keys, restore_item, service_key
 from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message
 
 log = logging.getLogger(__name__)
@@ -55,7 +56,8 @@ def uptime(started_at: str | None) -> str:
 
 
 class TelegramBotPanel:
-    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False, database_path: str = '/data/incidents.db', frontend_report_config: dict[str, Any] | None = None, bot_report_config: dict[str, Any] | None = None):
+    def __init__(self, token: str | None, allowed_chat_ids: list[str], projects: dict[str, Any], allow_restart: bool = False, database_path: str = '/data/incidents.db', frontend_report_config: dict[str, Any] | None = None, bot_report_config: dict[str, Any] | None = None, base_config: dict[str, Any] | None = None):
+        self.base_config = base_config
         self.token = token
         self.allowed_chat_ids = set(allowed_chat_ids)
         self.projects = projects or {}
@@ -68,6 +70,75 @@ class TelegramBotPanel:
         self.stop_event = threading.Event()
         self.offset = 0
         self.api_url = f"https://api.telegram.org/bot{token}" if token else ""
+
+    def refresh(self) -> None:
+        """Re-read the removed-items list so menus and reports match what is monitored."""
+        if self.base_config is None:
+            return
+        try:
+            config = apply_removals(self.base_config, removed_keys(self.database_path))
+        except (sqlite3.Error, OSError):
+            log.exception("Could not read removed items")
+            return
+        self.projects = config.get("projects") or {}
+        self.frontend_report_config = (config.get("daily_reports") or {}).get("frontend", {})
+        self.bot_report_config = config.get("bot_reports") or {}
+
+    def remove_confirm_page(self, group_id: str, project_id: str, service_name: str | None = None) -> tuple[str, list[list[dict[str, str]]]]:
+        project = self.project_by_id(group_id, project_id)
+        service = next((s for s in (project or {}).get("services", []) if s["name"] == service_name), None) if service_name else None
+        if not project or (service_name and not service):
+            return "<b>Item not found</b>\n\nIt may already have been removed.", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        if service:
+            label, back = service.get("menu_name", service["name"]), f"service:{group_id}:{project_id}:{project['services'].index(service)}"
+            yes = f"rmsvc:{group_id}:{project_id}:{service_name}"
+        else:
+            label, back = project.get("menu_name", project["name"]), f"project:{group_id}:{project_id}"
+            yes = f"rm:{group_id}:{project_id}"
+        return (f"🗑 <b>Remove from monitoring?</b>\n\n<code>{esc(label)}</code> will no longer be checked, reported, or alerted on, "
+                "and its open incidents will be closed without a notification.\n\n"
+                "The application itself is not touched. Use /removed to bring it back."), [
+                    [{"text": "✅ Yes, remove", "callback_data": yes}, {"text": "❌ Cancel", "callback_data": back}]]
+
+    def remove_item(self, group_id: str, project_id: str, service_name: str | None = None) -> tuple[str, list[list[dict[str, str]]]]:
+        project = self.project_by_id(group_id, project_id)
+        service = next((s for s in (project or {}).get("services", []) if s["name"] == service_name), None) if service_name else None
+        if not project or (service_name and not service):
+            return "<b>Item not found</b>\n\nIt may already have been removed.", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        if service:
+            key, label = service_key(group_id, project_id, service_name), service.get("menu_name", service["name"])
+        else:
+            key, label = project_key(group_id, project_id), project.get("menu_name", project["name"])
+        try:
+            remove_item(self.database_path, key, label)
+        except (sqlite3.Error, OSError) as exc:
+            log.exception("Could not remove %s", key)
+            return f"❌ <b>Removal failed</b>\n\n<code>{esc(exc)}</code>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        self.refresh()
+        log.warning("removed from monitoring: %s", key)
+        return (f"✅ <b>Removed</b>\n\n<code>{esc(label)}</code> is no longer monitored.\n\nUse /removed to restore it."), [
+            [{"text": "⬅️ Back", "callback_data": f"group:{group_id}"}]]
+
+    def removed_page(self, notice: str = "") -> tuple[str, list[list[dict[str, str]]]]:
+        try:
+            items = removed_items(self.database_path)
+        except (sqlite3.Error, OSError):
+            items = []
+        text = notice + ("🗑 <b>Removed from monitoring</b>\n\n" + "\n".join(f"• {esc(item['label'])}" for item in items)
+                         if items else "🗑 <b>Removed from monitoring</b>\n\nNothing has been removed.")
+        buttons = [[{"text": f"↩️ Restore {item['label'][:30]}", "callback_data": f"restore:{item['id']}"}] for item in items]
+        buttons.append([{"text": "⬅️ Groups", "callback_data": "home"}])
+        return text, buttons
+
+    def restore(self, item_id: int) -> tuple[str, list[list[dict[str, str]]]]:
+        try:
+            label = restore_item(self.database_path, item_id)
+        except (sqlite3.Error, OSError):
+            log.exception("Could not restore item %s", item_id)
+            label = None
+        self.refresh()
+        notice = f"✅ <b>Restored</b> <code>{esc(label)}</code>. Monitoring resumes within seconds.\n\n" if label else ""
+        return self.removed_page(notice)
 
     def overview_text(self) -> str:
         frontend = self.projects.get("frontend", {}).get("items", [])
@@ -160,6 +231,7 @@ class TelegramBotPanel:
                 "/docker or /bots — Docker bot projects\n"
                 "/services — system services\n"
                 "/incidents — active incidents\n"
+                "/removed — items removed from monitoring (restore)\n"
                 "/frontendhealth — frontend health report\n"
                 "/botshealth — bot health report\n"
                 "/help — show this help")
@@ -189,6 +261,7 @@ class TelegramBotPanel:
             {"command": "docker", "description": "Show Docker bot projects"},
             {"command": "services", "description": "Show system services"},
             {"command": "incidents", "description": "Show active incidents"},
+            {"command": "removed", "description": "Restore removed items"},
             {"command": "frontendhealth", "description": "Show frontend health report"},
             {"command": "botshealth", "description": "Show bot health report"},
             {"command": "help", "description": "Show available commands"},
@@ -317,6 +390,7 @@ class TelegramBotPanel:
             for index, service in enumerate(services)
         ]
         buttons.extend([service_buttons[index:index + 2] for index in range(0, len(service_buttons), 2)])
+        buttons.append([{"text": "🗑 Remove from monitoring", "callback_data": f"rm-confirm:{group_id}:{project_id}"}])
         buttons.append([{"text": "⬅️ Projects", "callback_data": f"group:{group_id}"}])
         return "\n".join(lines), buttons
 
@@ -425,7 +499,9 @@ class TelegramBotPanel:
                      f"\n<b>Last reload:</b> {esc(activity.get('last_reload_at') or 'unknown')}"
                      f"\n<b>RPC failures (10m):</b> {esc(activity.get('rpc_failures_10m') or 0)}")
         return text, [[{"text": "🔄 Refresh", "callback_data": f"service:{group_id}:{project_id}:{index}"}],
-                      [{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}]]
+                      [{"text": "🗑 Remove from monitoring", "callback_data": f"rmsvc-confirm:{group_id}:{project_id}:{service['name']}"}],
+                      [{"text": "⬅️ Services" if group_id == "bots_systemd" else "⬅️ Project",
+                        "callback_data": f"group:{group_id}" if group_id == "bots_systemd" else f"project:{group_id}:{project_id}"}]]
 
     def handle(self, update: dict[str, Any]) -> None:
         message = update.get("message")
@@ -436,6 +512,7 @@ class TelegramBotPanel:
         if chat_id not in self.allowed_chat_ids:
             log.warning("Ignoring Telegram update from unauthorized chat %s", chat_id)
             return
+        self.refresh()
         if message:
             words = (message.get('text') or '').split()
             command = words[0].lower().split('@')[0] if words else ''
@@ -452,6 +529,9 @@ class TelegramBotPanel:
                 self.send(chat_id, text, keyboard)
             elif command == "/incidents":
                 self.send(chat_id, self.active_incidents_text())
+            elif command == "/removed":
+                text, keyboard = self.removed_page()
+                self.send(chat_id, text, keyboard)
             elif command in {"/frontendhealth", "/frontendreport"}:
                 self.send(chat_id, self.frontend_health_report_text())
             elif command in {"/botshealth", "/botsreport", "/zigwhalehealth", "/zigwhale"}:
@@ -487,6 +567,20 @@ class TelegramBotPanel:
         elif data.startswith("service:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.service_page(group_id, project_id, int(index))
+        elif data.startswith("rm-confirm:"):
+            _, group_id, project_id = data.split(":", 2)
+            text, keyboard = self.remove_confirm_page(group_id, project_id)
+        elif data.startswith("rm:"):
+            _, group_id, project_id = data.split(":", 2)
+            text, keyboard = self.remove_item(group_id, project_id)
+        elif data.startswith("rmsvc-confirm:"):
+            _, group_id, project_id, name = data.split(":", 3)
+            text, keyboard = self.remove_confirm_page(group_id, project_id, name)
+        elif data.startswith("rmsvc:"):
+            _, group_id, project_id, name = data.split(":", 3)
+            text, keyboard = self.remove_item(group_id, project_id, name)
+        elif data.startswith("restore:") and data[8:].isdigit():
+            text, keyboard = self.restore(int(data[8:]))
         else:
             return
         if message_id:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -92,6 +93,29 @@ class IncidentStore:
     def mark_alert_sent(self, key: str) -> None:
         self.db.execute('UPDATE incidents SET last_alert_at=? WHERE fingerprint=?', (now(), key))
         self.db.commit()
+
+    def discard(self, projects: set[str] | list[str], containers: set[str] | list[str],
+                services: set[str] | list[str]) -> int:
+        """Silently close incidents (and queued recoveries) for removed items."""
+        projects, containers, services = set(projects), set(containers), set(services)
+
+        def removed(project: str, service: str, incident_type: str) -> bool:
+            systemd = incident_type.startswith('SYSTEMD')
+            return ((project in projects and not systemd) or service in containers
+                    or (systemd and service in services))
+
+        count = 0
+        for row in self.db.execute("SELECT fingerprint, project, service, incident_type FROM incidents WHERE status='OPEN'").fetchall():
+            if removed(row['project'], row['service'], row['incident_type']):
+                self.db.execute("UPDATE incidents SET status='REMOVED', resolved_at=? WHERE fingerprint=?", (now(), row['fingerprint']))
+                self.db.execute('DELETE FROM recovery_queue WHERE fingerprint=?', (row['fingerprint'],))
+                count += 1
+        for row in self.db.execute('SELECT fingerprint, payload FROM recovery_queue').fetchall():
+            payload = json.loads(row['payload'])
+            if removed(payload['project'], payload['service'], payload['incident_type']):
+                self.db.execute('DELETE FROM recovery_queue WHERE fingerprint=?', (row['fingerprint'],))
+        self.db.commit()
+        return count
 
     def recover_stale(self, active_keys: set[str], protected_services: set[str] | None = None) -> list[dict[str, Any]]:
         rows = self.db.execute("SELECT * FROM incidents WHERE status='OPEN'").fetchall()
