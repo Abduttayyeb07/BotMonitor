@@ -19,7 +19,7 @@ from .docker_checks import checks as docker_checks, log_checks, snapshot as dock
 from .incident_store import IncidentStore, fingerprint
 from .notifier import TelegramNotifier
 from .removals import apply_removals, removed_keys
-from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message, should_send_daily_report
+from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message, should_send_daily_report, sol_usdt_results
 from .telegram_bot import TelegramBotPanel
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
@@ -52,6 +52,7 @@ def issue_text(incident: dict) -> str:
     messages = {
         "PROJECT_DOWN": incident['message'],
         "CONTAINER_DOWN": "Docker reported that the container is down.",
+        "SOL_SYNC_LAG": incident['message'],
         "SYSTEMD_DOWN": "systemd reported that the service is not active.",
         "HIGH_MEMORY": "Host memory usage exceeded the configured threshold.",
         "DISK_FULL": "Host disk usage exceeded the configured threshold.",
@@ -134,6 +135,43 @@ def discard_removed(store: IncidentStore, config: dict) -> None:
             log.info("closed %s open incident(s) for items removed from monitoring", closed)
 
 
+class SolSyncWatch:
+    """Alert only when the Sol USDT bot is stalled or far behind the chain head.
+
+    The check reads logs and calls public RPCs, so it runs every
+    check_interval_seconds, not every poll. The result is cached between runs
+    so the incident stays open (and is not falsely recovered) in between, and
+    two consecutive bad checks are required before it is reported.
+    """
+    def __init__(self):
+        self.last_run = 0.0
+        self.bad_checks = 0
+        self.finding = None
+
+    def findings(self, config: dict) -> list[dict]:
+        section = (config.get("bot_reports") or {}).get("sol_usdt")
+        if not section or section.get("enabled", True) is False:
+            self.bad_checks, self.finding = 0, None
+            return []
+        if time.monotonic() - self.last_run >= int(section.get("check_interval_seconds", 30)):
+            self.last_run = time.monotonic()
+            try:
+                result = sol_usdt_results(section)
+            except Exception:
+                log.exception("sol usdt sync check failed")
+                return [self.finding] if self.finding else []
+            # A stopped container is already reported by the Docker check.
+            problem = result.get("sync_problem") if result.get("running") else ""
+            if problem:
+                self.bad_checks += 1
+                if self.bad_checks >= 2:
+                    self.finding = {"project": "sol-usdt", "service": section.get("container", "sol-usdt-monitor"),
+                                    "type": "SOL_SYNC_LAG", "severity": "CRITICAL", "message": problem}
+            elif result.get("running") and result.get("height") is not None and result.get("lag") is not None:
+                self.bad_checks, self.finding = 0, None
+        return [self.finding] if self.finding else []
+
+
 def main() -> None:
     base_config = load_config(os.getenv("MONITOR_CONFIG", "config.yaml"))
     database_path = base_config.get("database_path", "data/incidents.db")
@@ -177,6 +215,7 @@ def main() -> None:
     poll_number = 0
     summary_every = max(1, int(config.get("summary_interval_seconds", 300) / max(interval, 1)))
     outage_window = OutageWindow()
+    sol_watch = SolSyncWatch()
     report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True})
     bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True})
     default_report_times = ["11:00", "23:00"]
@@ -202,6 +241,7 @@ def main() -> None:
         findings += log_checks(config.get("docker", {}), log_cursors)
         findings += systemd_checks(config.get("systemd", {}), config.get("systemd_status_path", "/data/systemd-status.json"))
         findings += endpoint_checks(config.get("docker", {}).get("containers") or [])
+        findings += sol_watch.findings(config)
         findings = collapse_project_failures(findings, config)
         # A project outage resolves only when all its members are healthy.
         protected = set()

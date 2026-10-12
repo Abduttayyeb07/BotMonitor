@@ -25,6 +25,7 @@ BOT_REPORT_KEYS = {
     "bep20": "bep20_usdt",
     "ethtethertoken": "eth_usdt",
     "sheetszahoor": "sheets_sync",
+    "sol-usdt": "sol_usdt",
 }
 SYSTEM_SERVICE_UNITS = ("wallet-watchman.service", "zigchain-exporter.service")
 

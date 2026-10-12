@@ -108,6 +108,17 @@ bot_reports:
     log_tail_lines: 500
     max_gap_seconds: 4500
     completion_grace_seconds: 300
+  sol_usdt:
+    container: sol-usdt-monitor
+    log_tail_lines: 1000
+    # The bot logs "[BLOCK] Live slot N" for every slot (~0.4s apart).
+    # Alert when stalled, or when 100+ slots behind the chain head / its own [SYNC] line.
+    stall_after_seconds: 60
+    max_slot_lag: 100
+    check_interval_seconds: 30
+    rpcs:
+      - https://api.mainnet-beta.solana.com
+      - https://solana-rpc.publicnode.com
   system_services:
     status_path: /data/systemd-status.json
     collector_max_age_seconds: 60
@@ -318,6 +329,9 @@ docker:
     - name: sheets-sync
       project: sheets-sync
       critical: true
+    - name: sol-usdt-monitor
+      project: sol-usdt
+      critical: true
     - name: zigchain-bot
       project: patronicluster
       critical: true
@@ -494,6 +508,14 @@ projects:
         compose_file: /root/saad/sheetszahoor/docker-compose.yml
         containers:
           - sheets-sync
+      - id: sol-usdt
+        name: Sol USDT Monitor
+        menu_name: Sol USDT
+        compose_project: sol-usdt-bot
+        working_dir: /root/saad/Sol-USDT-bot
+        compose_file: /root/saad/Sol-USDT-bot/docker-compose.yml
+        containers:
+          - sol-usdt-monitor
   bots_systemd:
     title: System Services
     icon: ⚙️

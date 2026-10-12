@@ -31,6 +31,11 @@ DEFAULT_TOKENX_CONTAINER = "bsc-and-eth-token-monitor"
 DEFAULT_BEP20_CONTAINER = "bep20-usdt-telegram-monitor"
 DEFAULT_ETH_USDT_CONTAINER = "eth-usdt-telegram-monitor"
 DEFAULT_SHEETS_SYNC_CONTAINER = "sheets-sync"
+DEFAULT_SOL_USDT_CONTAINER = "sol-usdt-monitor"
+DEFAULT_SOLANA_RPCS = ("https://api.mainnet-beta.solana.com", "https://solana-rpc.publicnode.com")
+SOL_SLOT_LINE = re.compile(r"\[BLOCK\]\s+Live slot\s+(\d+)", re.IGNORECASE)
+SOL_SYNC_LINE = re.compile(r"\[SYNC\]\s+(?P<state>[A-Za-z_ ]+?)\s*\|.*?behind\s+(?P<behind>-?\d+)", re.IGNORECASE)
+SOL_RECOVERY_LINE = re.compile(r"\[RECOVERY\]\s+Catch-up\s+(started|complete)", re.IGNORECASE)
 SHEETS_SYNC_VAULTS = (
     "Stablecoin Yield Vault",
     "USDC Opportunistic Credit Vault",
@@ -533,6 +538,94 @@ def nawa_valdora_results(config: dict[str, Any] | None = None) -> dict[str, Any]
             "rpcs": rpc_results, "rpc_spread": rpc_spread, "internal_gap": internal_gap, "error": "; ".join(errors)}
 
 
+def parse_sol_slots(log_text: str, now: datetime | None = None) -> dict[str, Any]:
+    """Latest '[BLOCK] Live slot N' line, its age, and any unfinished catch-up."""
+    now = now or datetime.now(timezone.utc)
+    latest = None
+    recovery = None
+    sync = None
+    for line in log_text.splitlines():
+        stamp = _docker_timestamp(line)
+        if not stamp:
+            continue
+        stamp = stamp.astimezone(timezone.utc)
+        slot = SOL_SLOT_LINE.search(line)
+        if slot and (latest is None or stamp >= latest[1]):
+            latest = (int(slot.group(1)), stamp)
+        own = SOL_SYNC_LINE.search(line)
+        if own and (sync is None or stamp >= sync[2]):
+            sync = (own.group("state").strip().upper(), int(own.group("behind")), stamp)
+        step = SOL_RECOVERY_LINE.search(line)
+        if step and (recovery is None or stamp >= recovery[1]):
+            recovery = (step.group(1).lower(), stamp)
+    result = {"slot": None, "age_seconds": None, "recovery_age_seconds": None,
+              "sync_state": None, "sync_behind": None, "sync_age_seconds": None}
+    if sync:
+        result.update(sync_state=sync[0], sync_behind=sync[1], sync_age_seconds=max(0, int((now - sync[2]).total_seconds())))
+    if latest:
+        result.update(slot=latest[0], age_seconds=max(0, int((now - latest[1]).total_seconds())))
+    if recovery and recovery[0] == "started":
+        result["recovery_age_seconds"] = max(0, int((now - recovery[1]).total_seconds()))
+    return result
+
+
+def _solana_head(url: str) -> int:
+    response = requests.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "getSlot",
+                                        "params": [{"commitment": "processed"}]}, timeout=5)
+    response.raise_for_status()
+    return int(response.json()["result"])
+
+
+def sol_usdt_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The bot logs every slot it sees; it must be fresh and close to the chain head."""
+    config = config or {}
+    state = _container_state(config.get("container", DEFAULT_SOL_USDT_CONTAINER))
+    logs = _container_logs(config.get("container", DEFAULT_SOL_USDT_CONTAINER), int(config.get("log_tail_lines", 1000)))
+    parsed = parse_sol_slots(logs)
+    stall_after = int(config.get("stall_after_seconds", 60))
+    max_lag = int(config.get("max_slot_lag", 100))
+    catchup_after = int(config.get("catchup_stuck_seconds", 120))
+
+    heads = []
+    head_errors = []
+    for url in config.get("rpcs") or DEFAULT_SOLANA_RPCS:
+        try:
+            heads.append(_solana_head(url))
+        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+            head_errors.append(f"{url}: {type(exc).__name__}")
+    head = max(heads) if heads else None
+    slot, age = parsed["slot"], parsed["age_seconds"]
+    lag = max(0, head - slot) if head is not None and slot is not None else None
+
+    errors = []
+    # Problems that should page someone: the bot is stalled or at least max_lag slots behind.
+    sync_problems = []
+    if not state["running"]:
+        errors.append(f"Container is {state['status']} (health {state['health'] or 'not configured'})")
+    if slot is None:
+        errors.append("No '[BLOCK] Live slot' log line found")
+    elif age > stall_after:
+        sync_problems.append(f"Stalled: slot {slot} last logged {age}s ago (limit {stall_after}s)")
+    if head is None:
+        errors.append("Solana chain head unavailable: " + "; ".join(head_errors))
+    elif lag is not None and lag >= max_lag:
+        sync_problems.append(f"{lag} slots behind chain head {head} (limit {max_lag})")
+    own_behind = parsed["sync_behind"]
+    if own_behind is not None and own_behind >= max_lag and parsed["sync_age_seconds"] <= int(config.get("sync_line_max_age_seconds", 300)):
+        sync_problems.append(f"Bot reports {parsed['sync_state']}: {own_behind} slots behind its RPC (limit {max_lag})")
+    if parsed["recovery_age_seconds"] is not None and parsed["recovery_age_seconds"] > catchup_after:
+        errors.append(f"Catch-up has not completed for {parsed['recovery_age_seconds']}s")
+    errors = sync_problems + errors
+    if slot is None:
+        summary = "no slot logs"
+    else:
+        summary = (f"slot {slot}, " + ("head unavailable" if lag is None else f"{lag} behind head")
+                   + f", logged {age}s ago" + (f", {parsed['sync_state'].lower()}" if parsed["sync_state"] else ""))
+    return {"name": "Sol USDT", "ok": not errors, "running": state["running"], "height": slot, "head": head,
+            "lag": lag, "age_seconds": age, "summary": summary, "error": "; ".join(errors),
+            "sync_problem": "; ".join(sync_problems)}
+
+
 def _last_advance_age(samples: list[dict[str, Any]], field: str, now: datetime) -> int | None:
     last_advance = None
     for previous, current in zip(samples, samples[1:]):
@@ -816,6 +909,7 @@ def collect_bots_report(config: dict[str, Any] | None = None) -> str:
         "eth_usdt": ("ETH USDT", usdt_backfill_results, "ETH USDT", config.get("eth_usdt", {}), DEFAULT_ETH_USDT_CONTAINER),
         "sheets_sync": ("Sheets Sync", sheets_sync_results, config.get("sheets_sync", {})),
         "system_services": ("System Services", system_service_results, config.get("system_services", {})),
+        "sol_usdt": ("Sol USDT", sol_usdt_results, config.get("sol_usdt", {})),
     }
     enabled = {key: spec for key, spec in specs.items() if (config.get(key) or {}).get("enabled", True)}
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -887,6 +981,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
                         eth_results: dict[str, Any] | None = None,
                         sheets_results: dict[str, Any] | None = None,
                         system_results: dict[str, Any] | None = None,
+                        sol_results: dict[str, Any] | None = None,
                         generated_at: datetime | None = None) -> str:
     generated_at = generated_at or datetime.now(PKT)
     zig_ok = sum(1 for item in zig_whale_results if item["ok"])
@@ -934,6 +1029,9 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
         last = sheets_results.get("last_completed") or "never"
         bot_checks.append({"name": "Sheets Sync", "ok": sheets_results["ok"],
                            "summary": f"{sheets_results.get('updated', 0)}/{sheets_results.get('total', 3)} vaults, last {last}"})
+    if sol_results is not None:
+        bot_checks.append({"name": "Sol USDT", "ok": sol_results["ok"],
+                           "summary": sol_results.get("summary") or sol_results.get("error", "needs attention")[:80]})
     if system_results is not None:
         for item in system_results.get("services", []):
             bot_checks.append({"name": item["name"], "ok": item["ok"], "summary": item["summary"]})
@@ -996,7 +1094,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
         other_failures.append(("MDF Tracker", mdf_results["error"]))
     if highbuy_results is not None and not highbuy_results["ok"]:
         other_failures.append(("HighBuy Monitor", highbuy_results["error"]))
-    for result in (nawa_results, tokenx_results, bep20_results, eth_results, sheets_results):
+    for result in (nawa_results, tokenx_results, bep20_results, eth_results, sheets_results, sol_results):
         if result is not None and not result["ok"]:
             other_failures.append((result["name"], result["error"]))
     if system_results is not None and not system_results["ok"]:

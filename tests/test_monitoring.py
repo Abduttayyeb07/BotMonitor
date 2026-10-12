@@ -17,6 +17,11 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
+def requests_error():
+    import requests
+    return requests.ConnectionError('down')
+
+
 class MonitoringRegressionTests(unittest.TestCase):
     def test_inventory_closes_client_without_context_manager_support(self):
         container = SimpleNamespace(name='a', reload=Mock())
@@ -591,6 +596,80 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertIn('empty response', result['services'][1]['error'])
 
+    # --- Sol USDT bot -----------------------------------------------------------
+
+    @staticmethod
+    def sol_logs(last_slot, seconds_ago, extra=''):
+        now = datetime.now(timezone.utc)
+        lines = [f"{(now - timedelta(seconds=seconds_ago + (last_slot - slot) * 0.4)).isoformat()} sol-usdt-monitor  | [BLOCK] Live slot {slot}"
+                 for slot in range(last_slot - 20, last_slot + 1)]
+        return '\n'.join(lines) + extra
+
+    def sol_result(self, logs, heads, running=True):
+        from monitor.reports import sol_usdt_results
+        heads = list(heads)
+        with patch('monitor.reports._container_state', return_value={'running': running, 'status': 'running', 'health': None}), \
+             patch('monitor.reports._container_logs', return_value=logs), \
+             patch('monitor.reports._solana_head', side_effect=heads):
+            return sol_usdt_results({'rpcs': ['a', 'b'][:len(heads)]})
+
+    def test_sol_usdt_is_healthy_when_live_and_close_to_head(self):
+        result = self.sol_result(self.sol_logs(455995881, 1), [455995880, 455995883])
+        self.assertTrue(result['ok'], result['error'])
+        self.assertEqual(result['lag'], 2)
+        self.assertEqual(result['sync_problem'], '')
+
+    def test_sol_usdt_small_drift_is_not_an_alert_but_100_behind_is(self):
+        small = self.sol_result(self.sol_logs(455995881, 1), [455995881 + 99])
+        self.assertTrue(small['ok'])
+        far = self.sol_result(self.sol_logs(455995881, 1), [455995881 + 100])
+        self.assertFalse(far['ok'])
+        self.assertIn('100 slots behind', far['sync_problem'])
+
+    def test_sol_usdt_stalled_log_is_flagged(self):
+        result = self.sol_result(self.sol_logs(455995881, 120), [455995881])
+        self.assertIn('Stalled', result['sync_problem'])
+
+    def test_sol_usdt_uses_the_bots_own_sync_line(self):
+        now = datetime.now(timezone.utc).isoformat()
+        synced = self.sol_result(self.sol_logs(455995881, 1, f"\n{now} x | [SYNC] SYNCED | ws slot 455995881 | rpc slot 455995880 | behind -1"), [455995881])
+        self.assertTrue(synced['ok'])
+        self.assertIn('synced', synced['summary'])
+        behind = self.sol_result(self.sol_logs(455995881, 1, f"\n{now} x | [SYNC] BEHIND | ws slot 455995881 | rpc slot 455996001 | behind 120"), [455995881])
+        self.assertIn('120 slots behind its RPC', behind['sync_problem'])
+
+    def test_sol_usdt_rpc_outage_is_reported_but_not_a_sync_alert(self):
+        from monitor.reports import sol_usdt_results
+        with patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports._container_logs', return_value=self.sol_logs(455995881, 1)), \
+             patch('monitor.reports._solana_head', side_effect=requests_error()):
+            result = sol_usdt_results({'rpcs': ['a']})
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['sync_problem'], '')
+
+    def test_sol_watch_needs_two_bad_checks_then_holds_until_clear(self):
+        from monitor.service import SolSyncWatch
+        watch = SolSyncWatch()
+        config = {'bot_reports': {'sol_usdt': {'check_interval_seconds': 0}}}
+        bad = {'running': True, 'sync_problem': '150 slots behind', 'height': 1, 'lag': 150}
+        good = {'running': True, 'sync_problem': '', 'height': 1, 'lag': 1}
+        with patch('monitor.service.sol_usdt_results', side_effect=[bad, bad, good]):
+            self.assertEqual(watch.findings(config), [])
+            self.assertEqual(watch.findings(config)[0]['type'], 'SOL_SYNC_LAG')
+            self.assertEqual(watch.findings(config), [])
+        self.assertEqual(fingerprint('sol-usdt', 's', 'SOL_SYNC_LAG', '150 slots behind 456000000'),
+                         fingerprint('sol-usdt', 's', 'SOL_SYNC_LAG', '210 slots behind 456000999'))
+
+    def test_removed_sol_bot_stops_the_watch(self):
+        from monitor.removals import apply_removals, project_key
+        from monitor.service import SolSyncWatch
+        base = {'bot_reports': {'sol_usdt': {'container': 'sol-usdt-monitor'}},
+                'projects': {'bots_docker': {'items': [{'id': 'sol-usdt', 'name': 'Sol', 'containers': ['sol-usdt-monitor']}]}}}
+        config = apply_removals(base, {project_key('bots_docker', 'sol-usdt')})
+        with patch('monitor.service.sol_usdt_results') as check:
+            self.assertEqual(SolSyncWatch().findings(config), [])
+        check.assert_not_called()
+
     # --- Remove from monitoring -------------------------------------------------
 
     @staticmethod
@@ -636,7 +715,7 @@ class MonitoringRegressionTests(unittest.TestCase):
             message = collect_bots_report({**config['bot_reports'], **{
                 key: {'enabled': False} for key in ('zig_usd_alerts', 'wallet_monitor', 'zigchain_bot', 'stake_unstake',
                                                     'mdf_tracker', 'highbuy_monitor', 'nawa_valdora', 'tokenx_vault',
-                                                    'bep20_usdt', 'eth_usdt', 'sheets_sync', 'system_services')}})
+                                                    'bep20_usdt', 'eth_usdt', 'sheets_sync', 'system_services', 'sol_usdt')}})
         whale.assert_not_called()
         self.assertIn('No bots are being monitored', message)
         self.assertNotIn('Zig Whale', message)
