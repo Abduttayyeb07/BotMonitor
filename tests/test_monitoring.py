@@ -670,6 +670,20 @@ class MonitoringRegressionTests(unittest.TestCase):
             self.assertEqual(SolSyncWatch().findings(config), [])
         check.assert_not_called()
 
+    def test_sol_usdt_is_added_to_menu_for_old_configs_but_not_duplicated(self):
+        old = 'projects:\n  bots_docker:\n    title: Bots\n    items:\n      - {id: other, name: Other, containers: [other]}\ndocker:\n  containers:\n    - {name: other, project: other}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'config.yaml'
+            path.write_text(old, encoding='utf-8')
+            config = load_config(str(path))
+            self.assertEqual([i['id'] for i in config['projects']['bots_docker']['items']], ['other', 'sol-usdt'])
+            self.assertIn('sol-usdt-monitor', [c['name'] for c in config['docker']['containers']])
+            self.assertEqual(config['bot_reports']['sol_usdt']['max_slot_lag'], 100)
+            self.assertEqual(config['docker']['containers'][-1]['project'], 'sol-usdt')
+            path.write_text(old.replace('Other, containers: [other]', 'Other, containers: [other]}\n      - {id: sol-usdt, name: Mine, containers: [sol-usdt-monitor]'), encoding='utf-8')
+            again = load_config(str(path))
+            self.assertEqual([i['name'] for i in again['projects']['bots_docker']['items']], ['Other', 'Mine'])
+
     # --- Remove from monitoring -------------------------------------------------
 
     @staticmethod
