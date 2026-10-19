@@ -497,6 +497,76 @@ def highbuy_monitor_results(config: dict[str, Any] | None = None) -> dict[str, A
     }
 
 
+def nawa_finance_redeemer_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = config or {}
+    container = config.get("container", "nawa-finance-redeemer")
+    tail = int(config.get("log_tail_lines", 1000))
+    stale_after = int(config.get("stale_after_seconds", 180))
+    window = int(config.get("error_window_seconds", 600))
+    threshold = int(config.get("error_threshold", 3))
+
+    state = _container_state(container)
+    logs = _container_logs(container, tail=tail)
+
+    heartbeat = parse_log_freshness(
+        logs,
+        "[ZIG] mempool contains",
+        stale_after_seconds=stale_after,
+    )
+
+    zig_pattern = re.compile(
+        r"\[ZIG\].*(rpc timeout, retrying|mempool poll failed, retrying)",
+        re.IGNORECASE,
+    )
+    eth_pattern = re.compile(
+        r"\[ETH\].*(websocket error|websocket disconnected, reconnecting|subscription not confirmed in time, reconnecting|pong timeout, terminating socket)",
+        re.IGNORECASE,
+    )
+    tg_pattern = re.compile(
+        r"\[TG\].*getUpdates failed, retrying",
+        re.IGNORECASE,
+    )
+
+    zig_errors = len(_recent_matching_lines(logs, zig_pattern, window))
+    eth_errors = len(_recent_matching_lines(logs, eth_pattern, window))
+    tg_errors = len(_recent_matching_lines(logs, tg_pattern, window))
+
+    errors = []
+    if not state["running"]:
+        errors.append(
+            f"Container is {state['status']} "
+            f"(health {state['health'] or 'not configured'})"
+        )
+    if not heartbeat["ok"]:
+        errors.append(heartbeat["error"])
+    if zig_errors >= threshold:
+        errors.append(f"ZIG errors {zig_errors}/{window}s (limit {threshold})")
+    if eth_errors >= threshold:
+        errors.append(f"ETH errors {eth_errors}/{window}s (limit {threshold})")
+    if tg_errors >= threshold:
+        errors.append(f"TG errors {tg_errors}/{window}s (limit {threshold})")
+
+    age = heartbeat.get("age_seconds")
+    age_text = "missing" if age is None else f"{age}s ago"
+    container_text = "container running" if state["running"] else f"container {state['status']}"
+    summary = (
+        f"{container_text}; Zig heartbeat {age_text}; "
+        f"ZIG errors {zig_errors}/{window}s; "
+        f"ETH errors {eth_errors}/{window}s; "
+        f"TG errors {tg_errors}/{window}s"
+    )
+
+    return {
+        "name": "NAWA Finance Redeemer",
+        "ok": not errors,
+        "summary": summary,
+        "age_seconds": age,
+        "zig_errors": zig_errors,
+        "eth_errors": eth_errors,
+        "tg_errors": tg_errors,
+        "error": "; ".join(errors),
+    }
+
 def nawa_valdora_results(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or {}
     state = _container_state(config.get("container", DEFAULT_NAWA_CONTAINER))
@@ -904,6 +974,7 @@ def collect_bots_report(config: dict[str, Any] | None = None) -> str:
         "mdf_tracker": ("MDF Tracker", mdf_tracker_results, config.get("mdf_tracker", {})),
         "highbuy_monitor": ("HighBuy Monitor", highbuy_monitor_results, config.get("highbuy_monitor", {})),
         "nawa_valdora": ("Nawa Valdora", nawa_valdora_results, config.get("nawa_valdora", {})),
+        "nawa_finance_redeemer": ("NAWA Finance Redeemer", nawa_finance_redeemer_results, config.get("nawa_finance_redeemer", {})),
         "tokenx_vault": ("TokenX Vault", tokenx_vault_results, config.get("tokenx_vault", {})),
         "bep20_usdt": ("BEP20 USDT", usdt_backfill_results, "BEP20 USDT", config.get("bep20_usdt", {}), DEFAULT_BEP20_CONTAINER),
         "eth_usdt": ("ETH USDT", usdt_backfill_results, "ETH USDT", config.get("eth_usdt", {}), DEFAULT_ETH_USDT_CONTAINER),
@@ -976,6 +1047,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
                         mdf_results: dict[str, Any] | None = None,
                         highbuy_results: dict[str, Any] | None = None,
                         nawa_results: dict[str, Any] | None = None,
+                        nawa_finance_results: dict[str, Any] | None = None,
                         tokenx_results: dict[str, Any] | None = None,
                         bep20_results: dict[str, Any] | None = None,
                         eth_results: dict[str, Any] | None = None,
@@ -1015,6 +1087,16 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
     if nawa_results is not None:
         gap = "unknown" if nawa_results.get("internal_gap") is None else str(nawa_results["internal_gap"])
         bot_checks.append({"name": "Nawa Valdora", "ok": nawa_results["ok"], "summary": f"internal RPC {nawa_results.get('height') or '-'}, max gap {gap}"})
+    if nawa_finance_results is not None:
+        bot_checks.append({
+            "name": "NAWA Finance Redeemer",
+            "ok": nawa_finance_results["ok"],
+            "summary": nawa_finance_results.get(
+                "summary",
+                "container running" if nawa_finance_results["ok"]
+                else nawa_finance_results.get("error", "needs attention"),
+            ),
+        })
     if tokenx_results is not None:
         streams = tokenx_results.get("streams", [])
         healthy = sum(1 for item in streams if item["ok"])
@@ -1074,6 +1156,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
         rpc_rows.extend(f"{row['name']}: {row['height'] if row['height'] is not None else 'unavailable'}{' (syncing)' if row.get('catching_up') else ''}"
                         for row in nawa_results.get("rpcs", []))
         lines.extend(["", "— <b>Nawa Valdora Heights</b> —", "<pre>" + html.escape("\n".join(rpc_rows)) + "</pre>"])
+
     if tokenx_results is not None:
         stream_rows = [f"{item['name']}: {item['backlog'] if item['backlog'] is not None else '-'} behind, block {item['end'] or '-'}"
                        for item in tokenx_results.get("streams", [])]
@@ -1094,7 +1177,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
         other_failures.append(("MDF Tracker", mdf_results["error"]))
     if highbuy_results is not None and not highbuy_results["ok"]:
         other_failures.append(("HighBuy Monitor", highbuy_results["error"]))
-    for result in (nawa_results, tokenx_results, bep20_results, eth_results, sheets_results, sol_results):
+    for result in (nawa_results, nawa_finance_results, tokenx_results, bep20_results, eth_results, sheets_results, sol_results):
         if result is not None and not result["ok"]:
             other_failures.append((result["name"], result["error"]))
     if system_results is not None and not system_results["ok"]:

@@ -119,6 +119,13 @@ bot_reports:
     rpcs:
       - https://api.mainnet-beta.solana.com
       - https://solana-rpc.publicnode.com
+  nawa_finance_redeemer:
+    container: nawa-finance-redeemer
+    log_tail_lines: 1000
+    stale_after_seconds: 180
+    error_window_seconds: 600
+    error_threshold: 3
+
   system_services:
     status_path: /data/systemd-status.json
     collector_max_age_seconds: 60
@@ -212,6 +219,9 @@ docker:
       critical: true
     - name: zigchain-wallet-monitor
       project: zigchain-wallet-monitor
+      critical: true
+    - name: nawa-finance-redeemer
+      project: nawa-finance-redeemer
       critical: true
     - name: liquidityprovider-frontend
       project: liquidityprovider
@@ -475,6 +485,14 @@ projects:
         compose_file: /root/saad/NawaValdora/docker-compose.yml
         containers:
           - zigchain-wallet-monitor
+      - id: nawa-finance-redeemer
+        name: NAWA Finance Redeemer
+        menu_name: NAWA Finance Redeemer
+        compose_project: nawa-finance-redeemer
+        working_dir: /root/saad/nawa-finance-redeemer
+        compose_file: /root/saad/nawa-finance-redeemer/docker-compose.yml
+        containers:
+          - nawa-finance-redeemer
       - id: tokenx-vault
         name: TokenX Vault Monitors
         menu_name: TokenX Vault

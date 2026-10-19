@@ -9,7 +9,7 @@ from monitor.checks import systemd_checks
 from monitor.config import load_config
 from monitor.docker_checks import checks, inventory
 from monitor.incident_store import IncidentStore, fingerprint
-from monitor.reports import collect_bots_report, frontend_report_items, frontend_report_message, highbuy_monitor_results, mdf_tracker_results, nawa_valdora_results, parse_log_freshness, parse_zig_whale_logs, sheets_sync_results, should_send_daily_report, stake_unstake_results, system_service_results, tokenx_vault_results, usdt_backfill_results, wallet_monitor_results, zigchain_bot_results
+from monitor.reports import bots_report_message, collect_bots_report, frontend_report_items, frontend_report_message, highbuy_monitor_results, mdf_tracker_results, nawa_finance_redeemer_results, nawa_valdora_results, parse_log_freshness, parse_zig_whale_logs, sheets_sync_results, should_send_daily_report, stake_unstake_results, system_service_results, tokenx_vault_results, usdt_backfill_results, wallet_monitor_results, zigchain_bot_results
 from systemd.collector import watchman_activity
 from monitor.service import collapse_project_failures, OutageWindow
 from monitor.telegram_bot import TelegramBotPanel
@@ -721,6 +721,119 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertEqual(frontend_report_items(config['daily_reports']['frontend'], config['projects']), [])
         self.assertEqual(len(base['docker']['containers']), 3, 'base config must stay untouched')
 
+    def test_nawa_finance_redeemer_is_healthy_with_fresh_zig_heartbeat(self):
+        logs = "2026-10-19T10:00:00Z [INFO] [ZIG] mempool contains 0 txs\n"
+        with patch("monitor.reports._container_state", return_value={"running": True, "status": "running", "health": None}), \
+             patch("monitor.reports._container_logs", return_value=logs), \
+             patch("monitor.reports.datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 19, 10, 1, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_finance_redeemer_results({"container": "nawa-finance-redeemer"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["zig_errors"], 0)
+        self.assertEqual(result["eth_errors"], 0)
+        self.assertEqual(result["tg_errors"], 0)
+        self.assertIn("Zig heartbeat", result["summary"])
+
+    def test_nawa_finance_redeemer_flags_stale_zig_heartbeat(self):
+        logs = "2026-10-19T10:00:00Z [INFO] [ZIG] mempool contains 0 txs\n"
+        with patch("monitor.reports._container_state", return_value={"running": True, "status": "running", "health": None}), \
+             patch("monitor.reports._container_logs", return_value=logs), \
+             patch("monitor.reports.datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 19, 10, 4, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_finance_redeemer_results({
+                "container": "nawa-finance-redeemer",
+                "stale_after_seconds": 180,
+            })
+        self.assertFalse(result["ok"])
+        self.assertIn("No fresh '[ZIG] mempool contains'", result["error"])
+
+    def test_nawa_finance_redeemer_flags_eth_error_threshold(self):
+        logs = "\n".join([
+            "2026-10-19T10:05:00Z [INFO] [ZIG] mempool contains 0 txs",
+            "2026-10-19T10:06:00Z [WARN] [ETH] websocket error",
+            "2026-10-19T10:07:00Z [WARN] [ETH] websocket disconnected, reconnecting",
+            "2026-10-19T10:08:00Z [WARN] [ETH] pong timeout, terminating socket",
+        ])
+        with patch("monitor.reports._container_state", return_value={"running": True, "status": "running", "health": None}), \
+             patch("monitor.reports._container_logs", return_value=logs), \
+             patch("monitor.reports.datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 19, 10, 9, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_finance_redeemer_results({
+                "container": "nawa-finance-redeemer",
+                "error_window_seconds": 600,
+                "error_threshold": 3,
+            })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["eth_errors"], 3)
+        self.assertIn("ETH errors 3/600s", result["error"])
+
+    def test_nawa_finance_redeemer_flags_zig_error_threshold(self):
+        logs = "\n".join([
+            "2026-10-19T10:05:00Z [INFO] [ZIG] mempool contains 0 txs",
+            "2026-10-19T10:06:00Z [WARN] [ZIG] rpc timeout, retrying",
+            "2026-10-19T10:07:00Z [WARN] [ZIG] mempool poll failed, retrying",
+            "2026-10-19T10:08:00Z [WARN] [ZIG] rpc timeout, retrying",
+        ])
+        with patch("monitor.reports._container_state", return_value={"running": True, "status": "running", "health": None}), \
+             patch("monitor.reports._container_logs", return_value=logs), \
+             patch("monitor.reports.datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 19, 10, 9, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_finance_redeemer_results({
+                "container": "nawa-finance-redeemer",
+                "error_window_seconds": 600,
+                "error_threshold": 3,
+            })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["zig_errors"], 3)
+        self.assertIn("ZIG errors 3/600s", result["error"])
+
+    def test_nawa_finance_redeemer_flags_telegram_error_threshold(self):
+        logs = "\n".join([
+            "2026-10-19T10:05:00Z [INFO] [ZIG] mempool contains 0 txs",
+            "2026-10-19T10:06:00Z [WARN] [TG] getUpdates failed, retrying",
+            "2026-10-19T10:07:00Z [WARN] [TG] getUpdates failed, retrying",
+            "2026-10-19T10:08:00Z [WARN] [TG] getUpdates failed, retrying",
+        ])
+        with patch("monitor.reports._container_state", return_value={"running": True, "status": "running", "health": None}), \
+             patch("monitor.reports._container_logs", return_value=logs), \
+             patch("monitor.reports.datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 19, 10, 9, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_finance_redeemer_results({
+                "container": "nawa-finance-redeemer",
+                "error_window_seconds": 600,
+                "error_threshold": 3,
+            })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["tg_errors"], 3)
+        self.assertIn("TG errors 3/600s", result["error"])
+
+    def test_nawa_finance_redeemer_flags_stopped_container(self):
+        logs = "2026-10-19T10:05:00Z [INFO] [ZIG] mempool contains 0 txs\n"
+        with patch("monitor.reports._container_state", return_value={"running": False, "status": "exited", "health": None}), \
+             patch("monitor.reports._container_logs", return_value=logs), \
+             patch("monitor.reports.datetime") as dt:
+            dt.now.return_value = datetime(2026, 10, 19, 10, 6, tzinfo=timezone.utc)
+            dt.fromisoformat.side_effect = datetime.fromisoformat
+            result = nawa_finance_redeemer_results({"container": "nawa-finance-redeemer"})
+        self.assertFalse(result["ok"])
+        self.assertIn("Container is exited", result["error"])
+
+    def test_nawa_finance_redeemer_appears_in_combined_report(self):
+        result = {
+            "name": "NAWA Finance Redeemer",
+            "ok": True,
+            "summary": "container running; Zig heartbeat 30s ago; ZIG errors 0/600s; ETH errors 0/600s; TG errors 0/600s",
+            "error": "",
+        }
+        message = bots_report_message([], nawa_finance_results=result)
+        self.assertIn("NAWA Finance Redeemer", message)
+        self.assertIn("Zig heartbeat 30s ago", message)
+
     def test_removed_docker_bot_is_dropped_from_bots_report(self):
         from monitor.removals import apply_removals, project_key
         config = apply_removals(self.removal_config(), {project_key('bots_docker', 'marketzig')})
@@ -728,7 +841,7 @@ class MonitoringRegressionTests(unittest.TestCase):
         with patch('monitor.reports.zig_whale_exchange_results') as whale:
             message = collect_bots_report({**config['bot_reports'], **{
                 key: {'enabled': False} for key in ('zig_usd_alerts', 'wallet_monitor', 'zigchain_bot', 'stake_unstake',
-                                                    'mdf_tracker', 'highbuy_monitor', 'nawa_valdora', 'tokenx_vault',
+                                                    'mdf_tracker', 'highbuy_monitor', 'nawa_valdora', 'nawa_finance_redeemer', 'tokenx_vault',
                                                     'bep20_usdt', 'eth_usdt', 'sheets_sync', 'system_services', 'sol_usdt')}})
         whale.assert_not_called()
         self.assertIn('No bots are being monitored', message)
