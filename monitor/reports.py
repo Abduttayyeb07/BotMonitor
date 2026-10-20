@@ -46,9 +46,10 @@ DEFAULT_USDT_RPCS = {
     DEFAULT_BEP20_CONTAINER: "https://bsc-rpc.publicnode.com",
     DEFAULT_ETH_USDT_CONTAINER: "https://ethereum-rpc.publicnode.com",
 }
-# (name, url[, status path]). ZigScan and CryptoComics firewall /status (403) and serve it at /cc/status.
+# (name, url[, status path]). ZigScan and CryptoComics firewall /status (403) and serve it at /cc/status;
+# the internal RPC is being moved to /cc/status too (falls back to /status until then).
 ZIGCHAIN_RPCS = (
-    ("Internal RPC", "http://internal-bots-rpc.wickhub.cc"),
+    ("Internal RPC", "http://internal-bots-rpc.wickhub.cc", "/cc/status"),
     ("ZigScan", "https://zigchain-mainnet.zigscan.net", "/cc/status"),
     ("CryptoComics", "https://cryptocomics-rpc.wickhub.cc", "/cc/status"),
     ("Numia", "https://public-zigchain-rpc.numia.xyz/"),

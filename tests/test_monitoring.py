@@ -389,7 +389,21 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertIn('https://zigchain-mainnet.zigscan.net/cc/status', calls)
         self.assertIn('https://cryptocomics-rpc.wickhub.cc/cc/status', calls)
         self.assertNotIn('https://zigchain-mainnet.zigscan.net/status', calls)
-        self.assertIn('http://internal-bots-rpc.wickhub.cc/status', calls)
+        self.assertIn('http://internal-bots-rpc.wickhub.cc/cc/status', calls)
+        self.assertNotIn('http://internal-bots-rpc.wickhub.cc/status', calls)
+
+    def test_nawa_internal_rpc_falls_back_to_status_until_cc_status_exists(self):
+        import requests
+        def rpc_response(url, **_kwargs):
+            if 'internal-bots-rpc' in url and url.endswith('/cc/status'):
+                raise requests.HTTPError('404 Not Found')
+            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {
+                'latest_block_height': '12680019', 'catching_up': False}}})
+        with patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
+            result = nawa_valdora_results()
+        self.assertTrue(result['ok'], result['error'])
+        self.assertEqual(result['height'], 12680019)
 
     def test_nawa_ignores_unreachable_public_rpcs_but_not_a_missing_internal_rpc(self):
         import requests

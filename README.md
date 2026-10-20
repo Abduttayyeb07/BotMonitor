@@ -125,9 +125,9 @@ The report uses Docker log timestamps and container health, plus these live
 checks:
 
 - Nawa Valdora checks that `zigchain-wallet-monitor` is running and compares
-  `/status` heights from its internal RPC and Numia, and `/cc/status` heights
-  from ZigScan and CryptoComics (they block `/status`; `/abci_info` is the last
-  fallback). A public RPC that cannot be reached is shown but not counted as a
+  `/cc/status` heights from its internal RPC, ZigScan and CryptoComics (ZigScan
+  and CryptoComics block `/status`), and `/status` from Numia. If a path fails
+  it falls back to `/status`, then `/abci_info`. A public RPC that cannot be reached is shown but not counted as a
   failure.
   The internal height must be within 20 blocks of every reachable public RPC.
 - TokenX Vault reads the latest `HTTP backfill ... backlog=N` line for BSC and
