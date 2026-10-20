@@ -46,10 +46,11 @@ DEFAULT_USDT_RPCS = {
     DEFAULT_BEP20_CONTAINER: "https://bsc-rpc.publicnode.com",
     DEFAULT_ETH_USDT_CONTAINER: "https://ethereum-rpc.publicnode.com",
 }
+# (name, url[, status path]). ZigScan and CryptoComics firewall /status (403) and serve it at /cc/status.
 ZIGCHAIN_RPCS = (
     ("Internal RPC", "http://internal-bots-rpc.wickhub.cc"),
-    ("ZigScan", "https://zigchain-mainnet.zigscan.net"),
-    ("CryptoComics", "https://cryptocomics-rpc.wickhub.cc"),
+    ("ZigScan", "https://zigchain-mainnet.zigscan.net", "/cc/status"),
+    ("CryptoComics", "https://cryptocomics-rpc.wickhub.cc", "/cc/status"),
     ("Numia", "https://public-zigchain-rpc.numia.xyz/"),
 )
 BACKFILL_LINE = re.compile(
@@ -571,11 +572,11 @@ def nawa_valdora_results(config: dict[str, Any] | None = None) -> dict[str, Any]
     config = config or {}
     state = _container_state(config.get("container", DEFAULT_NAWA_CONTAINER))
 
-    def read_rpc(label: str, url: str) -> dict[str, Any]:
-        # ZigScan and CryptoComics answer 403 on /status (a firewall rule on that path) but serve the
-        # same status at /cc/status, and the latest height at /abci_info. Try them in that order.
+    def read_rpc(label: str, url: str, status_path: str = "/status") -> dict[str, Any]:
+        # Use the RPC's own status path first; if it fails, fall back to the other known
+        # status paths and finally /abci_info, which carries the latest height.
         errors = []
-        for path in ("/status", "/cc/status", "/abci_info"):
+        for path in dict.fromkeys((status_path, "/status", "/cc/status", "/abci_info")):
             try:
                 response = requests.get(url.rstrip("/") + path, timeout=8)
                 response.raise_for_status()

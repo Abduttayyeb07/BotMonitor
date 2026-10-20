@@ -125,8 +125,11 @@ The report uses Docker log timestamps and container health, plus these live
 checks:
 
 - Nawa Valdora checks that `zigchain-wallet-monitor` is running and compares
-  `/status` heights from its internal RPC, ZigScan, CryptoComics, and Numia.
-  The internal height must be within 20 blocks of every public RPC.
+  `/status` heights from its internal RPC and Numia, and `/cc/status` heights
+  from ZigScan and CryptoComics (they block `/status`; `/abci_info` is the last
+  fallback). A public RPC that cannot be reached is shown but not counted as a
+  failure.
+  The internal height must be within 20 blocks of every reachable public RPC.
 - TokenX Vault reads the latest `HTTP backfill ... backlog=N` line for BSC and
   Ethereum USDT/USDC, requires each backlog at most 500 blocks, and checks that
   `tokenx-vault-postgres` is running and Docker reports it healthy. PostgreSQL

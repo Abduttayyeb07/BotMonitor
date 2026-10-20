@@ -376,6 +376,21 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertTrue(result['ok'], result['error'])
         self.assertEqual({row['name']: row['height'] for row in result['rpcs']}['CryptoComics'], 12680021)
 
+    def test_nawa_asks_zigscan_and_cryptocomics_on_cc_status_first(self):
+        calls = []
+        def rpc_response(url, **_kwargs):
+            calls.append(url)
+            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {
+                'latest_block_height': '12680019', 'catching_up': False}}})
+        with patch('monitor.reports._container_state', return_value={'running': True, 'status': 'running', 'health': None}), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
+            result = nawa_valdora_results()
+        self.assertTrue(result['ok'], result['error'])
+        self.assertIn('https://zigchain-mainnet.zigscan.net/cc/status', calls)
+        self.assertIn('https://cryptocomics-rpc.wickhub.cc/cc/status', calls)
+        self.assertNotIn('https://zigchain-mainnet.zigscan.net/status', calls)
+        self.assertIn('http://internal-bots-rpc.wickhub.cc/status', calls)
+
     def test_nawa_ignores_unreachable_public_rpcs_but_not_a_missing_internal_rpc(self):
         import requests
         heights = {'internal-bots-rpc': 12680019, 'numia': 12680021}
