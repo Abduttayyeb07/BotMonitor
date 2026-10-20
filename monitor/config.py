@@ -17,6 +17,14 @@ BUILTIN_DOCKER_BOTS = [{
     "report_key": "sol_usdt",
     "report": {"container": "sol-usdt-monitor", "log_tail_lines": 1000, "stall_after_seconds": 60,
                "max_slot_lag": 100, "check_interval_seconds": 30},
+}, {
+    "item": {"id": "nawa-finance-redeemer", "name": "NAWA Finance Redeemer", "menu_name": "NAWA Finance Redeemer",
+             "compose_project": "nawa-finance-redeemer", "working_dir": "/root/saad/nawa-finance-redeemer",
+             "compose_file": "/root/saad/nawa-finance-redeemer/docker-compose.yml",
+             "containers": ["nawa-finance-redeemer"]},
+    "report_key": "nawa_finance_redeemer",
+    "report": {"container": "nawa-finance-redeemer", "log_tail_lines": 1000, "stale_after_seconds": 180,
+               "error_window_seconds": 600, "error_threshold": 3},
 }]
 
 

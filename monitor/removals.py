@@ -26,6 +26,7 @@ BOT_REPORT_KEYS = {
     "ethtethertoken": "eth_usdt",
     "sheetszahoor": "sheets_sync",
     "sol-usdt": "sol_usdt",
+    "nawa-finance-redeemer": "nawa_finance_redeemer",
 }
 SYSTEM_SERVICE_UNITS = ("wallet-watchman.service", "zigchain-exporter.service")
 

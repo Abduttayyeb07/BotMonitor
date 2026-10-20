@@ -676,13 +676,14 @@ class MonitoringRegressionTests(unittest.TestCase):
             path = Path(directory) / 'config.yaml'
             path.write_text(old, encoding='utf-8')
             config = load_config(str(path))
-            self.assertEqual([i['id'] for i in config['projects']['bots_docker']['items']], ['other', 'sol-usdt'])
+            self.assertEqual([i['id'] for i in config['projects']['bots_docker']['items']], ['other', 'sol-usdt', 'nawa-finance-redeemer'])
+            self.assertEqual(config['bot_reports']['nawa_finance_redeemer']['container'], 'nawa-finance-redeemer')
             self.assertIn('sol-usdt-monitor', [c['name'] for c in config['docker']['containers']])
             self.assertEqual(config['bot_reports']['sol_usdt']['max_slot_lag'], 100)
-            self.assertEqual(config['docker']['containers'][-1]['project'], 'sol-usdt')
+            self.assertEqual(config['docker']['containers'][-2]['project'], 'sol-usdt')
             path.write_text(old.replace('Other, containers: [other]', 'Other, containers: [other]}\n      - {id: sol-usdt, name: Mine, containers: [sol-usdt-monitor]'), encoding='utf-8')
             again = load_config(str(path))
-            self.assertEqual([i['name'] for i in again['projects']['bots_docker']['items']], ['Other', 'Mine'])
+            self.assertEqual([i['name'] for i in again['projects']['bots_docker']['items']], ['Other', 'Mine', 'NAWA Finance Redeemer'])
 
     # --- Remove from monitoring -------------------------------------------------
 
