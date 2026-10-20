@@ -346,6 +346,65 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(result['internal_gap'], 2)
 
+    def test_nawa_falls_back_to_cc_status_then_abci_info_when_status_is_forbidden(self):
+        import requests
+        blocked_cc_status = False
+        def rpc_response(url, **_kwargs):
+            public = 'zigscan' in url or 'cryptocomics' in url
+            if public and url.endswith('/status') and not url.endswith('/cc/status'):
+                raise requests.HTTPError('403 Forbidden')
+            if public and url.endswith('/cc/status'):
+                if blocked_cc_status:
+                    raise requests.HTTPError('403 Forbidden')
+                return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {
+                    'latest_block_height': '12680020', 'catching_up': False}}})
+            if url.endswith('/abci_info'):
+                return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'response': {'last_block_height': '12680021'}}})
+            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {
+                'latest_block_height': '12680019', 'catching_up': False}}})
+        state = {'running': True, 'status': 'running', 'health': None}
+        with patch('monitor.reports._container_state', return_value=state), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
+            result = nawa_valdora_results()
+        self.assertTrue(result['ok'], result['error'])
+        self.assertEqual(result['unreachable_public'], [])
+        self.assertEqual({row['name']: row['height'] for row in result['rpcs']}['ZigScan'], 12680020)
+        blocked_cc_status = True
+        with patch('monitor.reports._container_state', return_value=state), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
+            result = nawa_valdora_results()
+        self.assertTrue(result['ok'], result['error'])
+        self.assertEqual({row['name']: row['height'] for row in result['rpcs']}['CryptoComics'], 12680021)
+
+    def test_nawa_ignores_unreachable_public_rpcs_but_not_a_missing_internal_rpc(self):
+        import requests
+        heights = {'internal-bots-rpc': 12680019, 'numia': 12680021}
+        def rpc_response(url, **_kwargs):
+            match = next((value for key, value in heights.items() if key in url), None)
+            if match is None:
+                raise requests.ConnectionError('blocked')
+            return SimpleNamespace(raise_for_status=Mock(), json=lambda: {'result': {'sync_info': {
+                'latest_block_height': str(match), 'catching_up': False}}})
+        state = {'running': True, 'status': 'running', 'health': None}
+        with patch('monitor.reports._container_state', return_value=state), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
+            result = nawa_valdora_results()
+        self.assertTrue(result['ok'], result['error'])
+        self.assertEqual(result['unreachable_public'], ['ZigScan', 'CryptoComics'])
+        self.assertEqual(result['internal_gap'], 2)
+        self.assertIn('unreachable, not counted', bots_report_message([], nawa_results=result))
+        del heights['internal-bots-rpc']
+        with patch('monitor.reports._container_state', return_value=state), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
+            down = nawa_valdora_results()
+        self.assertFalse(down['ok'])
+        self.assertIn('Internal RPC height unavailable', down['error'])
+        heights.clear()
+        with patch('monitor.reports._container_state', return_value=state), \
+             patch('monitor.reports.requests.get', side_effect=rpc_response):
+            nothing = nawa_valdora_results()
+        self.assertFalse(nothing['ok'])
+
     def test_tokenx_flags_backlog_over_500_and_checks_postgres_health(self):
         lines = []
         for chain, token, end, latest, backlog in [

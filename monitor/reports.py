@@ -572,32 +572,43 @@ def nawa_valdora_results(config: dict[str, Any] | None = None) -> dict[str, Any]
     state = _container_state(config.get("container", DEFAULT_NAWA_CONTAINER))
 
     def read_rpc(label: str, url: str) -> dict[str, Any]:
-        try:
-            response = requests.get(url.rstrip("/") + "/status", timeout=5)
-            response.raise_for_status()
-            sync_info = response.json()["result"]["sync_info"]
-            height = int(sync_info["latest_block_height"])
-            return {"name": label, "height": height, "catching_up": sync_info.get("catching_up", False), "error": ""}
-        except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-            return {"name": label, "height": None, "catching_up": None, "error": str(exc)[:150]}
+        # ZigScan and CryptoComics answer 403 on /status (a firewall rule on that path) but serve the
+        # same status at /cc/status, and the latest height at /abci_info. Try them in that order.
+        errors = []
+        for path in ("/status", "/cc/status", "/abci_info"):
+            try:
+                response = requests.get(url.rstrip("/") + path, timeout=8)
+                response.raise_for_status()
+                result = response.json()["result"]
+                if path != "/abci_info":
+                    sync_info = result["sync_info"]
+                    return {"name": label, "height": int(sync_info["latest_block_height"]),
+                            "catching_up": sync_info.get("catching_up", False), "error": ""}
+                return {"name": label, "height": int(result["response"]["last_block_height"]),
+                        "catching_up": False, "error": ""}
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                errors.append(f"{path} {type(exc).__name__}: {exc}")
+        return {"name": label, "height": None, "catching_up": None, "error": " | ".join(errors)[:150]}
 
     rpcs = config.get("rpcs", ZIGCHAIN_RPCS)
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         rpc_results = list(pool.map(lambda item: read_rpc(*item), rpcs))
 
     heights = [item["height"] for item in rpc_results if item["height"] is not None]
     internal = next((item["height"] for item in rpc_results if item["name"] == "Internal RPC"), None)
     public_heights = [item["height"] for item in rpc_results if item["name"] != "Internal RPC" and item["height"] is not None]
+    # A public RPC that does not answer says nothing about the bot: compare against the ones that do.
+    unreachable_public = [item["name"] for item in rpc_results if item["name"] != "Internal RPC" and item["height"] is None]
     max_gap = int(config.get("max_block_gap", 20))
-    rpc_spread = max(heights) - min(heights) if len(heights) == len(rpc_results) and heights else None
-    internal_gap = max(abs(internal - height) for height in public_heights) if internal is not None and len(public_heights) == len(rpc_results) - 1 else None
+    rpc_spread = max(heights) - min(heights) if len(heights) > 1 else None
+    internal_gap = max(abs(internal - height) for height in public_heights) if internal is not None and public_heights else None
     errors = []
     if not state["running"]:
         errors.append(f"Container is {state['status']} (health {state['health'] or 'not configured'})")
-    if len(heights) != len(rpc_results):
-        errors.append("RPC status unavailable: " + ", ".join(item["name"] for item in rpc_results if item["height"] is None))
     if internal is None:
         errors.append("Internal RPC height unavailable")
+    elif not public_heights:
+        errors.append("No public RPC reachable to verify the internal RPC height")
     if any(item["catching_up"] for item in rpc_results):
         errors.append("RPC still syncing: " + ", ".join(item["name"] for item in rpc_results if item["catching_up"]))
     if rpc_spread is not None and rpc_spread > max_gap:
@@ -605,7 +616,8 @@ def nawa_valdora_results(config: dict[str, Any] | None = None) -> dict[str, Any]
     if internal_gap is not None and internal_gap > max_gap:
         errors.append(f"Internal RPC differs from a public RPC by {internal_gap} blocks (limit {max_gap})")
     return {"name": "Nawa Valdora", "ok": not errors, "height": internal,
-            "rpcs": rpc_results, "rpc_spread": rpc_spread, "internal_gap": internal_gap, "error": "; ".join(errors)}
+            "rpcs": rpc_results, "rpc_spread": rpc_spread, "internal_gap": internal_gap,
+            "unreachable_public": unreachable_public, "error": "; ".join(errors)}
 
 
 def parse_sol_slots(log_text: str, now: datetime | None = None) -> dict[str, Any]:
@@ -1086,7 +1098,9 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
                            "summary": highbuy_results.get("summary", "container running" if highbuy_results["ok"] else highbuy_results.get("error", "needs attention"))})
     if nawa_results is not None:
         gap = "unknown" if nawa_results.get("internal_gap") is None else str(nawa_results["internal_gap"])
-        bot_checks.append({"name": "Nawa Valdora", "ok": nawa_results["ok"], "summary": f"internal RPC {nawa_results.get('height') or '-'}, max gap {gap}"})
+        skipped = nawa_results.get("unreachable_public") or []
+        note = f" ({', '.join(skipped)} unreachable, not counted)" if skipped else ""
+        bot_checks.append({"name": "Nawa Valdora", "ok": nawa_results["ok"], "summary": f"internal RPC {nawa_results.get('height') or '-'}, max gap {gap}{note}"})
     if nawa_finance_results is not None:
         bot_checks.append({
             "name": "NAWA Finance Redeemer",
@@ -1153,7 +1167,7 @@ def bots_report_message(zig_whale_results: list[dict[str, Any]], zig_usd_results
 
     if nawa_results is not None:
         rpc_rows = [f"Internal RPC: {nawa_results.get('height') or '-'}  Max gap: {nawa_results.get('internal_gap') if nawa_results.get('internal_gap') is not None else '-'}"]
-        rpc_rows.extend(f"{row['name']}: {row['height'] if row['height'] is not None else 'unavailable'}{' (syncing)' if row.get('catching_up') else ''}"
+        rpc_rows.extend(f"{row['name']}: {row['height'] if row['height'] is not None else 'unavailable (' + (row.get('error') or 'no response')[:60] + ')'}{' (syncing)' if row.get('catching_up') else ''}"
                         for row in nawa_results.get("rpcs", []))
         lines.extend(["", "— <b>Nawa Valdora Heights</b> —", "<pre>" + html.escape("\n".join(rpc_rows)) + "</pre>"])
 
