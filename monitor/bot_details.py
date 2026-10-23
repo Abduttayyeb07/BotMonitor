@@ -1,8 +1,8 @@
-"""Bot-specific details for each project panel, built from the monitor's existing checks.
+"""Bot-specific details for the "ℹ️ Bot Info" page, built from the monitor's existing checks.
 
-Each bot gets its own section (Zig Whale: exchanges, Sol USDT: slot vs chain head,
+Each bot gets its own cards (Zig Whale: exchanges, Sol USDT: slot vs chain head,
 Nawa Valdora: RPC heights, ...). The checks in reports.py are only called, never
-changed, and a check that fails shows as "unavailable" instead of hiding the panel.
+changed, and a check that fails shows as "unavailable" instead of breaking the page.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from .reports import (DEFAULT_BEP20_CONTAINER, DEFAULT_ETH_USDT_CONTAINER, front
                       nawa_finance_redeemer_results, nawa_valdora_results, sheets_sync_results, sol_usdt_results,
                       stake_unstake_results, tokenx_vault_results, usdt_backfill_results, wallet_monitor_results,
                       zig_usd_alerts_results, zig_whale_exchange_results, zigchain_bot_results)
-from .view import ago, e, number, section
+from .view import ago, card, e, number, quote
 
 log = logging.getLogger(__name__)
 
@@ -22,28 +22,26 @@ HEALTHY, ATTENTION = "🟢 Healthy", "🔴 Needs attention"
 
 
 def _health(result: dict[str, Any], *items) -> str:
-    return section("Bot Health", [("Status", HEALTHY if result.get("ok") else ATTENTION), *items,
-                                  ("Issue", result.get("error") or None)])
+    return card("🩺 Bot Health", [("Status", HEALTHY if result.get("ok") else ATTENTION), *items,
+                                 ("Issue", result.get("error") or None)])
+
+
+def _list_card(heading: str, rows: list[str], expandable: bool = False) -> str:
+    return quote([f"<b>{heading}</b>", *rows], expandable) if rows else ""
 
 
 def zig_whale(results: list[dict[str, Any]]) -> str:
     fresh = sum(1 for item in results if item["ok"])
-    blocks = [section("Bot Health", [("Status", HEALTHY if fresh == len(results) else ATTENTION),
-                                     ("Exchanges fresh", f"{fresh}/{len(results)}")])]
+    health = card("🩺 Bot Health", [("Status", HEALTHY if fresh == len(results) else ATTENTION),
+                                   ("Exchanges fresh", f"{fresh}/{len(results)}")])
     rows = []
     for item in results:
-        lines = [f"{'🟢' if item['ok'] else '🔴'} <b>{e(item['exchange'])}</b>"]
-        if item.get("age_seconds") is not None:
-            lines.append(f"   • Last data: {e(ago(item['age_seconds']))}")
-        if item.get("largest_buy"):
-            lines.append(f"   • Largest buy: {e(item['largest_buy'])}")
-        if item.get("volume"):
-            lines.append(f"   • 24h volume: {e(item['volume'])}")
-        if not item["ok"] and item.get("error"):
-            lines.append(f"   • Issue: {e(item['error'])}")
-        rows.append("\n".join(lines))
-    blocks.append("<b>Exchanges</b>\n" + "\n".join(rows))
-    return "\n\n".join(blocks)
+        details = [("Last data", ago(item.get("age_seconds"))), ("Largest buy", item.get("largest_buy")),
+                   ("24h volume", item.get("volume")), ("Issue", item.get("error") if not item["ok"] else None)]
+        details = [detail for detail in details if detail[1]]
+        rows.append(f"{'🟢' if item['ok'] else '🔴'} <b>{e(item['exchange'])}</b>")
+        rows += [f"{'└' if index == len(details) - 1 else '├'} {e(label)}: {e(value)}" for index, (label, value) in enumerate(details)]
+    return "\n\n".join(block for block in (health, _list_card("💱 Exchanges", rows, expandable=len(results) > 3)) if block)
 
 
 def sol_usdt(result: dict[str, Any]) -> str:
@@ -53,26 +51,25 @@ def sol_usdt(result: dict[str, Any]) -> str:
 
 
 def nawa_valdora(result: dict[str, Any]) -> str:
-    rows = []
-    for rpc in result.get("rpcs", []):
-        if rpc.get("height") is not None:
-            rows.append(f"🟢 {e(rpc['name'])}: {e(number(rpc['height']))}" + (" (syncing)" if rpc.get("catching_up") else ""))
-        else:
-            rows.append(f"🔴 {e(rpc['name'])}: unavailable")
     gap = result.get("internal_gap")
     health = _health(result, ("Internal height", number(result.get("height"))),
                      ("Max gap", f"{gap} blocks" if gap is not None else None))
-    return health + ("\n\n<b>RPC Heights</b>\n" + "\n".join(rows) if rows else "")
+    rpcs = result.get("rpcs", [])
+    rows = [f"{'└' if index == len(rpcs) - 1 else '├'} {'🟢' if rpc.get('height') is not None else '🔴'} {e(rpc['name'])}: "
+            + (e(number(rpc["height"])) + (" (syncing)" if rpc.get("catching_up") else "") if rpc.get("height") is not None else "unavailable")
+            for index, rpc in enumerate(rpcs)]
+    return "\n\n".join(block for block in (health, _list_card("🔗 RPC Heights", rows)) if block)
 
 
 def tokenx_vault(result: dict[str, Any]) -> str:
+    streams = result.get("streams", [])
     rows = []
-    for stream in result.get("streams", []):
+    for index, stream in enumerate(streams):
         behind = f"{stream['backlog']:,} behind" if stream.get("backlog") is not None else "no progress logs"
         block = f" · block {stream['end']:,}" if stream.get("end") is not None else ""
-        rows.append(f"{'🟢' if stream['ok'] else '🔴'} {e(stream['name'])}: {e(behind + block)}")
+        rows.append(f"{'└' if index == len(streams) - 1 else '├'} {'🟢' if stream['ok'] else '🔴'} {e(stream['name'])}: {e(behind + block)}")
     health = _health(result, ("Postgres", result.get("postgres")))
-    return health + ("\n\n<b>Backfill Streams</b>\n" + "\n".join(rows) if rows else "")
+    return "\n\n".join(block for block in (health, _list_card("🔄 Backfill Streams", rows)) if block)
 
 
 def usdt_scan(result: dict[str, Any]) -> str:
@@ -149,6 +146,10 @@ def check_key(project: dict[str, Any], bot_reports: dict[str, Any]) -> str | Non
     return None
 
 
+def unavailable(heading: str, exc: Exception) -> str:
+    return card(heading, [("Status", "⚪ Check unavailable"), ("Reason", f"{type(exc).__name__}: {exc}"[:200])])
+
+
 def bot_details(project: dict[str, Any], bot_reports: dict[str, Any]) -> str | None:
     key = check_key(project, bot_reports)
     if key is None:
@@ -158,7 +159,7 @@ def bot_details(project: dict[str, Any], bot_reports: dict[str, Any]) -> str | N
         return render(check(bot_reports.get(key) or {}))
     except Exception as exc:
         log.warning("bot details check failed: %s (%s: %s)", key, type(exc).__name__, exc)
-        return section("Bot Health", [("Status", "⚪ Check unavailable"), ("Reason", f"{type(exc).__name__}: {exc}"[:200])])
+        return unavailable("🩺 Bot Health", exc)
 
 
 def frontend_details(project: dict[str, Any], frontend_config: dict[str, Any], projects: dict[str, Any]) -> str | None:
@@ -168,8 +169,8 @@ def frontend_details(project: dict[str, Any], frontend_config: dict[str, Any], p
     try:
         result = frontend_endpoint_results([item])[0]
     except Exception as exc:
-        return section("Frontend Health", [("Status", "⚪ Check unavailable"), ("Reason", f"{type(exc).__name__}: {exc}"[:200])])
-    return section("Frontend Health", [
+        return unavailable("🌐 Frontend Health", exc)
+    return card("🌐 Frontend Health", [
         ("Status", "🟢 Reachable" if result["ok"] else "🔴 Not reachable"),
         ("URL", result.get("url") or "not configured", "code"),
         ("HTTP status", result.get("status_code")),

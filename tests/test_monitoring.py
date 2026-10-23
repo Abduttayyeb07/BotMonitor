@@ -411,10 +411,10 @@ class MonitoringRegressionTests(unittest.TestCase):
              patch('monitor.telegram_bot.bot_details', return_value=None):
             project_text, _ = panel.pretty_project_page('bots_docker', 'sol-usdt')
             container_text, _ = panel.container_page('bots_docker', 'sol-usdt', 0)
-        self.assertIn('• Node.js: v20.11.1', project_text)
-        self.assertIn('• Libraries: 8', project_text)
-        self.assertIn('• Dependencies: 8 production', container_text)
-        self.assertIn('• Built: 12 Oct 2026, 14:02 PKT', container_text)
+        self.assertIn('├ Node.js: v20.11.1', project_text)
+        self.assertIn('├ Libraries: 8', project_text)
+        self.assertIn('├ Dependencies: 8', container_text)
+        self.assertIn('├ Built: 12 Oct 2026, 14:02 PKT', container_text)
         for text in (project_text, container_text):
             self.assertNotIn('supersecret123', text)
             self.assertNotIn('TELEGRAM_BOT_TOKEN', text)
@@ -448,9 +448,9 @@ class MonitoringRegressionTests(unittest.TestCase):
             container.stats.assert_not_called()
             container_text, _ = panel.container_page('bots_docker', 'sol-usdt', 0)
         self.assertNotIn('Memory', project_text)
-        self.assertIn('<b>System Resources</b>\n• Memory: 84 MB / 8.0 GB\n• CPU: 1.2%', container_text)
+        self.assertIn('<b>📊 System Resources</b>\n├ Memory: 84 MB / 8.0 GB\n└ CPU: 1.2%', container_text)
 
-    # --- Panels: same layout for every bot and frontend, plus each bot's own details ---
+    # --- Panels: cards for every bot and frontend, a Bot Info page per bot, logs in a code box ---
 
     WHALE_LOG = ('2026-10-23T11:14:32.123456789Z [2026-10-23T11:14:32.120Z] [Gate.io] monitoring — '
                  'largest buy this cycle=6.7K ZIG threshold=1.0M ZIG 24hVol=95.1K USDT')
@@ -459,50 +459,87 @@ class MonitoringRegressionTests(unittest.TestCase):
         panel = TelegramBotPanel('token', ['1'], projects, **kwargs)
         return panel, patch.object(panel, 'container', side_effect=lambda name: containers.get(name))
 
-    def test_every_container_of_every_project_gets_the_full_panel(self):
+    def test_cards_use_tree_lines_and_skip_missing_values(self):
+        from monitor.view import card, grouped_card
+        self.assertEqual(card('📦 Status', [('A', 1), ('B', None), None, ('Image', 'a<b>', 'code'), ('C', 3)]),
+                         '<blockquote><b>📦 Status</b>\n├ A: 1\n├ Image: <code>a&lt;b&gt;</code>\n└ C: 3</blockquote>')
+        self.assertEqual(card('Empty', [('A', None)]), '')
+        self.assertEqual(grouped_card('🐳 web', [('⚙️ Runtime', [('Status', 'up')]), ('🧩 Env', [('X', None)])], expandable=True),
+                         '<blockquote expandable><b>🐳 web</b>\n⚙️ Runtime\n└ Status: up</blockquote>')
+
+    def test_every_container_of_every_project_gets_the_same_card(self):
         web = self.fake_container(['NODE_VERSION=20.11.1'], {'/app/package.json': '{"dependencies": {"a": "1"}, "devDependencies": {"b": "1"}}'}, name='web')
         db = self.fake_container(['PG_VERSION=16.2'], working_dir='', name='db')
         projects = {'frontend': {'items': [{'id': 'lp', 'name': 'Liquidity Provider', 'containers': ['web', 'db', 'gone']}]}}
         panel, containers = self.panel_for(projects, {'web': web, 'db': db})
-        with containers, patch.object(panel, 'incident_history', return_value=(3, 1, 2)), \
-             patch('monitor.telegram_bot.frontend_details', return_value=None):
+        with containers, patch.object(panel, 'incident_history', return_value=(3, 1, 2)):
             text, keyboard = panel.pretty_project_page('frontend', 'lp')
-        self.assertIn('⚠️ <b>Status: 2/3 containers running</b>', text)
-        self.assertIn('<b>Container:</b> <code>web</code>\n\n<b>Runtime Information</b>\n• Status: 🟢 Running\n• Uptime:', text)
-        self.assertIn('<b>Environment</b>\n• Node.js: v20.11.1\n• Libraries: 1 (+1 dev)\n• Last updated: 12 Oct 2026', text)
-        self.assertIn('<b>Container:</b> <code>db</code>', text)
-        self.assertIn('<b>Environment</b>\n• PostgreSQL: 16.2\n• Last updated: 12 Oct 2026', text)
-        self.assertIn('<b>Container:</b> <code>gone</code>\n\n<b>Runtime Information</b>\n• Status: 🔴 Stopped or unavailable', text)
-        self.assertEqual(text.count('<b>Runtime Information</b>'), 3)
-        self.assertEqual(text.count('┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄'), 2, 'one divider between containers')
-        self.assertIn('<b>Incident History</b>\n• Total: 3\n• Active: 1\n• Recovered: 2', text)
-        self.assertTrue(text.rstrip().endswith('PKT</i>'), 'ends with the Last checked footer')
+        self.assertTrue(text.startswith('📊 <b>Liquidity Provider</b>\n<i>⚠️ 2/3 containers running</i>'))
+        self.assertIn('<blockquote expandable><b>🐳 web</b>\n⚙️ Runtime\n├ Status: 🟢 Running\n├ Uptime:', text)
+        self.assertIn('🧩 Environment\n├ Node.js: v20.11.1\n├ Libraries: 1 (+1 dev)\n└ Updated: 12 Oct 2026</blockquote>', text)
+        self.assertIn('<b>🐳 db</b>', text)
+        self.assertIn('🧩 Environment\n├ PostgreSQL: 16.2\n└ Updated: 12 Oct 2026', text)
+        self.assertIn('<b>🐳 gone</b>\n⚙️ Runtime\n└ Status: 🔴 Stopped or unavailable', text)
+        self.assertEqual(text.count('<blockquote expandable>'), 3, 'three containers -> collapsible cards')
+        self.assertIn('<blockquote><b>📚 Incident History</b>\n├ Total: 3\n├ Active: 1\n└ Recovered: 2</blockquote>', text)
+        self.assertNotIn('Frontend Health', text, 'bot-specific details live behind the Bot Info button')
+        self.assertTrue(text.endswith('PKT</i>'))
+        cards = [part.split('</blockquote>')[0] for part in text.split('<blockquote')[1:]]
+        self.assertTrue(cards and all('\n\n' not in body for body in cards), 'no blank lines inside a card')
         callbacks = [row[0]['callback_data'] for row in keyboard]
-        self.assertEqual(callbacks[:3], ['container:frontend:lp:0', 'container:frontend:lp:1', 'container:frontend:lp:2'])
-        self.assertIn('rm-confirm:frontend:lp', callbacks)
-        self.assertEqual(callbacks[-1], 'group:frontend')
+        self.assertEqual(callbacks, ['container:frontend:lp:0', 'container:frontend:lp:1', 'container:frontend:lp:2',
+                                     'botinfo:frontend:lp', 'rm-confirm:frontend:lp', 'group:frontend'])
+        self.assertEqual(keyboard[3][0]['text'], 'ℹ️ Bot Info')
 
-    def test_each_bot_panel_shows_its_own_details(self):
+    def test_one_or_two_containers_are_shown_open(self):
+        web = self.fake_container(['NODE_VERSION=24.22.1'], name='zig-whale-bot')
+        panel, containers = self.panel_for({'bots_docker': {'items': [{'id': 'marketzig', 'name': 'Zig Whale Bot', 'containers': ['zig-whale-bot']}]}},
+                                           {'zig-whale-bot': web})
+        with containers, patch.object(panel, 'incident_history', return_value=(0, 0, 0)):
+            text, _ = panel.pretty_project_page('bots_docker', 'marketzig')
+        self.assertIn('<i>✅ 1/1 containers running</i>', text)
+        self.assertIn('<blockquote><b>🐳 zig-whale-bot</b>', text)
+        self.assertNotIn('expandable', text)
+
+    def test_bot_info_page_shows_this_bots_own_details(self):
+        projects = {'bots_docker': {'items': [{'id': 'marketzig', 'name': 'Zig Whale Bot', 'containers': ['zig-whale-bot']}]},
+                    'frontend': {'items': [{'id': 'arkive', 'name': 'Arkive', 'containers': ['arkive']}]}}
+        panel = TelegramBotPanel('token', ['1'], projects)
+        with patch('monitor.telegram_bot.bot_details', return_value='<blockquote><b>🩺 Bot Health</b>\n└ Status: 🟢 Healthy</blockquote>') as bot, \
+             patch('monitor.telegram_bot.frontend_details', return_value='<blockquote><b>🌐 Frontend Health</b>\n└ Status: 🟢 Reachable</blockquote>') as front:
+            bot_text, bot_keyboard = panel.bot_info_page('bots_docker', 'marketzig')
+            front_text, _ = panel.bot_info_page('frontend', 'arkive')
+        self.assertTrue(bot_text.startswith('ℹ️ <b>Zig Whale Bot</b>\n<i>Bot Info</i>'))
+        self.assertIn('🩺 Bot Health', bot_text)
+        self.assertIn('🌐 Frontend Health', front_text)
+        bot.assert_called_once()
+        front.assert_called_once()
+        self.assertEqual([row[0]['callback_data'] for row in bot_keyboard], ['botinfo:bots_docker:marketzig', 'project:bots_docker:marketzig'])
+        with patch('monitor.telegram_bot.bot_details', return_value=None):
+            empty, _ = panel.bot_info_page('bots_docker', 'marketzig')
+        self.assertIn('No bot-specific check is set up for this one yet.', empty)
+
+    def test_each_bots_details_are_its_own(self):
         from monitor import bot_details as details
         whale = details.zig_whale([
             {'exchange': 'MEXC', 'ok': True, 'age_seconds': 41, 'largest_buy': '5.5K ZIG', 'volume': '183.2K USDT'},
             {'exchange': 'KuCoin', 'ok': False, 'age_seconds': None, 'error': 'No recent monitoring line found'}])
-        self.assertIn('• Status: 🔴 Needs attention\n• Exchanges fresh: 1/2', whale)
-        self.assertIn('🟢 <b>MEXC</b>\n   • Last data: 41s ago\n   • Largest buy: 5.5K ZIG\n   • 24h volume: 183.2K USDT', whale)
-        self.assertIn('🔴 <b>KuCoin</b>\n   • Issue: No recent monitoring line found', whale)
-        sol = details.sol_usdt({'ok': True, 'height': 459277691, 'head': 459277693, 'lag': 2, 'age_seconds': 0, 'error': ''})
-        self.assertEqual(sol, '<b>Bot Health</b>\n• Status: 🟢 Healthy\n• Bot slot: 459,277,691\n• Chain head: 459,277,693\n'
-                              '• Behind: 2 slots\n• Last slot logged: 0s ago')
+        self.assertIn('<b>🩺 Bot Health</b>\n├ Status: 🔴 Needs attention\n└ Exchanges fresh: 1/2', whale)
+        self.assertIn('🟢 <b>MEXC</b>\n├ Last data: 41s ago\n├ Largest buy: 5.5K ZIG\n└ 24h volume: 183.2K USDT', whale)
+        self.assertIn('🔴 <b>KuCoin</b>\n└ Issue: No recent monitoring line found', whale)
+        self.assertEqual(details.sol_usdt({'ok': True, 'height': 459277691, 'head': 459277693, 'lag': 2, 'age_seconds': 0, 'error': ''}),
+                         '<blockquote><b>🩺 Bot Health</b>\n├ Status: 🟢 Healthy\n├ Bot slot: 459,277,691\n├ Chain head: 459,277,693\n'
+                         '├ Behind: 2 slots\n└ Last slot logged: 0s ago</blockquote>')
         nawa = details.nawa_valdora({'ok': True, 'height': 13093142, 'internal_gap': 0, 'error': '', 'rpcs': [
             {'name': 'Internal RPC', 'height': 13093142}, {'name': 'ZigScan', 'height': None}]})
-        self.assertIn('• Internal height: 13,093,142\n• Max gap: 0 blocks', nawa)
-        self.assertIn('<b>RPC Heights</b>\n🟢 Internal RPC: 13,093,142\n🔴 ZigScan: unavailable', nawa)
+        self.assertIn('├ Internal height: 13,093,142\n└ Max gap: 0 blocks', nawa)
+        self.assertIn('<b>🔗 RPC Heights</b>\n├ 🟢 Internal RPC: 13,093,142\n└ 🔴 ZigScan: unavailable', nawa)
         tokenx = details.tokenx_vault({'ok': False, 'postgres': 'running/healthy', 'error': 'bsc USDC: backlog 900 exceeds 500', 'streams': [
             {'name': 'bsc USDT', 'backlog': 12, 'end': 1000, 'ok': True}, {'name': 'bsc USDC', 'backlog': 900, 'end': 900, 'ok': False}]})
-        self.assertIn('🟢 bsc USDT: 12 behind · block 1,000\n🔴 bsc USDC: 900 behind · block 900', tokenx)
-        self.assertIn('• Issue: bsc USDC: backlog 900 exceeds 500', tokenx)
-        self.assertIn('• Vaults updated: 3/3', details.sheets_sync({'ok': True, 'updated': 3, 'total': 3, 'last_completed': '20:13 PKT', 'age_seconds': 60}))
-        self.assertIn('• Last TX processed: not found in recent logs', details.freshness('Last TX processed')({'ok': False, 'age_seconds': None}))
+        self.assertIn('├ 🟢 bsc USDT: 12 behind · block 1,000\n└ 🔴 bsc USDC: 900 behind · block 900', tokenx)
+        self.assertIn('└ Issue: bsc USDC: backlog 900 exceeds 500', tokenx)
+        self.assertIn('├ Vaults updated: 3/3', details.sheets_sync({'ok': True, 'updated': 3, 'total': 3, 'last_completed': '20:13 PKT', 'age_seconds': 60}))
+        self.assertIn('Last TX processed: not found in recent logs', details.freshness('Last TX processed')({'ok': False, 'age_seconds': None}))
 
     def test_bot_check_is_found_by_project_id_or_by_container_and_skipped_when_removed(self):
         from monitor.bot_details import check_key
@@ -512,22 +549,22 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertIsNone(check_key({'id': 'marketzig', 'containers': []}, {'zig_whale': {'enabled': False}}))
         self.assertIsNone(check_key({'id': 'unknown', 'containers': ['x']}, {}))
 
-    def test_bot_panel_survives_a_failing_check(self):
+    def test_bot_info_survives_a_failing_check(self):
         from monitor.bot_details import bot_details
         with patch('monitor.bot_details.CHECKS', {'zig_whale': (Mock(side_effect=RuntimeError('docker down')), Mock())}):
             text = bot_details({'id': 'marketzig', 'containers': []}, {})
-        self.assertEqual(text, '<b>Bot Health</b>\n• Status: ⚪ Check unavailable\n• Reason: RuntimeError: docker down')
+        self.assertEqual(text, '<blockquote><b>🩺 Bot Health</b>\n├ Status: ⚪ Check unavailable\n└ Reason: RuntimeError: docker down</blockquote>')
 
-    def test_frontend_panel_shows_its_health_endpoint(self):
+    def test_frontend_bot_info_shows_its_health_endpoint(self):
         from monitor.bot_details import frontend_details
         result = [{'name': 'Arkive', 'url': 'http://127.0.0.1:8043/health', 'ok': True, 'status_code': 200, 'response_ms': 34, 'error': ''}]
         with patch('monitor.bot_details.frontend_endpoint_results', return_value=result):
             text = frontend_details({'id': 'arkive'}, {'items': [{'id': 'arkive', 'name': 'Arkive', 'health_url': 'http://127.0.0.1:8043/health'}]}, {})
-        self.assertEqual(text, '<b>Frontend Health</b>\n• Status: 🟢 Reachable\n• URL: <code>http://127.0.0.1:8043/health</code>\n'
-                               '• HTTP status: 200\n• Response time: 34 ms')
+        self.assertEqual(text, '<blockquote><b>🌐 Frontend Health</b>\n├ Status: 🟢 Reachable\n├ URL: <code>http://127.0.0.1:8043/health</code>\n'
+                               '├ HTTP status: 200\n└ Response time: 34 ms</blockquote>')
         self.assertIsNone(frontend_details({'id': 'not-a-frontend'}, {'items': [{'id': 'arkive', 'health_url': 'http://x'}]}, {}))
 
-    def test_details_page_sections_logs_and_buttons(self):
+    def test_details_page_has_cards_and_logs_in_the_code_box(self):
         container = self.fake_container(['NODE_VERSION=24.22.1'], {'/app/package.json': '{"dependencies": {"a": "1", "b": "1"}, "devDependencies": {"c": "1", "d": "1", "e": "1"}}'})
         container.logs = Mock(return_value='\n'.join([self.WHALE_LOG] * 12).encode())
         container.stats = Mock(return_value={})
@@ -536,53 +573,47 @@ class MonitoringRegressionTests(unittest.TestCase):
         with containers:
             text, keyboard = panel.container_page('bots_docker', 'marketzig', 0)
             full = panel.full_logs('bots_docker', 'marketzig', 0)
-        for heading in ('Container Status', 'Application Information', 'Deployment Information', 'Recent Logs'):
-            self.assertIn(f'<b>{heading}</b>', text)
-        self.assertNotIn('System Resources', text, 'no stats -> section left out rather than showing zeros')
-        self.assertIn('• Stack: Node.js 24.22.1\n• Dependencies: 2 production + 3 development', text)
-        self.assertIn('🕒 <i>23 Oct 2026 · 16:14:32 PKT</i>\n<b>Gate.io</b> · monitoring\n• Largest buy this cycle: 6.7K ZIG', text)
+        for heading in ('📦 Container Status', '🧩 Application', '🚀 Deployment'):
+            self.assertIn(f'<blockquote><b>{heading}</b>', text)
+        self.assertNotIn('System Resources', text, 'no stats -> card left out rather than showing zeros')
+        self.assertIn('├ Stack: Node.js 24.22.1\n├ Dependencies: 2 + 3 dev', text)
+        logs = text.split('📜 <b>Recent Logs</b>\n')[1]
+        self.assertTrue(logs.startswith('<pre>') and '</pre>' in logs, 'logs are in the dark code box')
+        self.assertIn('[Gate.io] monitoring — largest buy this cycle=6.7K ZIG threshold=1.0M ZIG 24hVol=95.1K USDT', logs,
+                      'log text is shown exactly as logged')
+        self.assertTrue(logs.startswith('<pre>16:14:32  [2026-10-23T11:14:32.120Z]'), 'Docker UTC stamp becomes PKT time')
         self.assertLessEqual(len(text), 4096)
-        self.assertEqual(text.count('🕒'), 12, 'all 12 recent entries fit on this page')
-        self.assertNotIn('Showing ', text, 'nothing left out, so no notice')
         callbacks = [button['callback_data'] for row in keyboard for button in row]
         for expected in ('container:bots_docker:marketzig:0', 'logs:bots_docker:marketzig:0',
                          'restart-confirm:bots_docker:marketzig:0', 'project:bots_docker:marketzig'):
             self.assertIn(expected, callbacks)
-        self.assertTrue(all(len(part) <= 4096 for part in full))
-        self.assertEqual(sum(part.count('🕒') for part in full), 12, 'full logs include every line')
+        self.assertTrue(all(len(part) <= 4096 and part.count('<pre>') == part.count('</pre>') == 1 for part in full))
+        self.assertEqual(sum(part.count('Gate.io') for part in full), 12, 'full logs include every line')
 
-    def test_log_formatting_is_line_by_line_and_never_alters_text(self):
-        from monitor.view import format_log_line
-        self.assertEqual(format_log_line('2026-10-23T11:14:33Z [SYNC] SYNCED | ws slot 455995881 | rpc slot 455995880 | behind -1'),
-                         '🕒 <i>23 Oct 2026 · 16:14:33 PKT</i>\n<b>SYNC</b> · SYNCED\n• ws slot 455995881\n• rpc slot 455995880\n• behind -1')
-        self.assertEqual(format_log_line('2026-10-23T11:14:34Z HTTP backfill bsc USDT 100-200; latest=300; backlog=100').splitlines()[1:],
-                         ['HTTP backfill bsc USDT 100-200', '• Latest: 300', '• Backlog: 100'])
-        # Special characters are escaped; an empty value is marked, never filled in.
-        tricky = format_log_line('2026-10-23T11:14:35Z [<script>] note= user=<b>&amp;')
-        self.assertIn('<b>&lt;script&gt;</b>', tricky)
-        self.assertIn('• Note: (empty)', tricky)
-        self.assertIn('• User: &lt;b&gt;&amp;amp;', tricky)
-        self.assertNotIn('<script>', tricky)
-        # JSON and other free text stay exactly as logged.
-        self.assertEqual(format_log_line('2026-10-23T11:14:36Z {"level":30,"msg":"a=b"}').splitlines()[1], '{"level":30,"msg":"a=b"}')
-        # Malformed lines (no Docker timestamp, impossible date) are shown raw.
-        self.assertEqual(format_log_line('Traceback & <oops>'), '<code>Traceback &amp; &lt;oops&gt;</code>')
-        self.assertEqual(format_log_line('2026-13-40T99:00:00Z broken'), '<code>2026-13-40T99:00:00Z broken</code>')
+    def test_log_lines_keep_text_and_only_shorten_the_time(self):
+        from monitor.view import log_text, code_box
+        today = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
+        self.assertEqual(log_text('2026-10-23T11:37:11.123456789Z 127.0.0.1 - - "GET /api/health HTTP/1.1" 200 -', today),
+                         '16:37:11  127.0.0.1 - - "GET /api/health HTTP/1.1" 200 -')
+        self.assertEqual(log_text('2026-10-21T11:37:11Z older line', today), '21 Oct 16:37:11  older line', 'older days keep their date')
+        self.assertEqual(log_text('Traceback (most recent call last):', today), 'Traceback (most recent call last):')
+        self.assertEqual(log_text('2026-13-40T99:00:00Z broken', today), '2026-13-40T99:00:00Z broken')
+        self.assertEqual(code_box(['a <b> & c']), '<pre>a &lt;b&gt; &amp; c</pre>', 'special characters are escaped')
 
-    def test_long_logs_are_split_never_cut(self):
-        from monitor.view import format_log_line, newest_that_fit, split_html, Panel
-        huge = format_log_line('2026-10-23T11:00:00Z [ERR] ' + 'x' * 9000 + ' <end>')
-        self.assertTrue(all(len(line) <= 3100 for line in huge.split('\n')))
-        panel = Panel('📜', 'logs')
-        for _ in range(3):
-            panel.add(huge)
-        parts = split_html(panel.html())
-        self.assertTrue(all(len(part) <= 4096 for part in parts))
-        self.assertEqual(sum(part.count('&lt;end&gt;') for part in parts), 3, 'every entry arrives in full')
-        entries = [f'entry {index} ' + 'y' * 300 for index in range(10)]
-        kept = newest_that_fit(entries, 1000)
-        self.assertEqual(kept, entries[-len(kept):], 'newest entries, oldest first')
-        self.assertLess(len(kept), 10)
+    def test_long_logs_are_split_into_code_boxes_never_cut(self):
+        from monitor.view import log_messages, newest_lines_that_fit
+        lines = [f'{index:02d} ' + 'x' * 300 for index in range(40)] + ['huge ' + 'y' * 9000 + ' <end>']
+        messages = log_messages('📜 <b>bot</b>', lines)
+        self.assertGreater(len(messages), 1)
+        self.assertTrue(all(len(message) <= 4096 for message in messages))
+        self.assertTrue(all(message.count('<pre>') == 1 and message.count('</pre>') == 1 for message in messages))
+        joined = ''.join(messages)
+        self.assertTrue(all(f'{index:02d} ' in joined for index in range(40)))
+        self.assertEqual(joined.count('y'), 9000, 'a huge line is split across boxes, not dropped')
+        self.assertIn('&lt;end&gt;', joined)
+        kept = newest_lines_that_fit(lines[:40], 1000)
+        self.assertEqual(kept, lines[:40][-len(kept):], 'newest lines, oldest first')
+        self.assertLess(len(kept), 40)
 
     def test_usage_lists_top_ten_projects_by_memory(self):
         projects = {'bots_docker': {'items': [{'id': f'p{i}', 'name': f'Project {i}', 'containers': [f'c{i}']} for i in range(12)]}}
@@ -597,12 +628,12 @@ class MonitoringRegressionTests(unittest.TestCase):
         panel, patched = self.panel_for(projects, containers)
         with patched, patch('monitor.telegram_bot.psutil.virtual_memory', return_value=SimpleNamespace(total=16 * 1024 ** 3, available=8 * 1024 ** 3)):
             text = panel.usage_text()
-        self.assertIn('<b>🥇 Project 11</b>\n• Memory: 1.2 GB (7.3% of server)\n• CPU: 1.0%\n• Containers: 1/1 running', text)
+        self.assertIn('<blockquote><b>🥇 Project 11</b>\n├ Memory: 1.2 GB · 7.3%\n├ CPU: 1.0%\n└ Containers: 1/1 running</blockquote>', text)
         self.assertIn('<b>🥈 Project 10</b>', text)
         self.assertIn('<b>10. Project 2</b>', text)
         self.assertNotIn('Project 1<', text)
         self.assertNotIn('Project 0<', text)
-        self.assertIn('• Memory used: 8.0 GB of 16.0 GB (50%)', text)
+        self.assertIn('├ Used: 8.0 GB of 16.0 GB (50%)', text)
         self.assertLessEqual(len(text), 4096)
 
     def test_long_pages_are_sent_in_parts_with_buttons_kept(self):
@@ -611,7 +642,7 @@ class MonitoringRegressionTests(unittest.TestCase):
         def api(method, payload, **_):
             calls.append((method, payload))
             return {'result': {'message_id': len(calls)}}
-        long_text = '\n\n'.join(f'<b>block {i}</b>\n' + 'x' * 400 for i in range(20))
+        long_text = '\n\n'.join(f'<blockquote><b>card {i}</b>\n└ ' + 'x' * 400 + '</blockquote>' for i in range(20))
         with patch.object(panel, 'api', side_effect=api):
             last_id = panel.send('1', long_text, [[{'text': 'b', 'callback_data': 'home'}]])
             sends = [payload for method, payload in calls]
@@ -619,6 +650,7 @@ class MonitoringRegressionTests(unittest.TestCase):
             panel.edit('1', 9, long_text, [[{'text': 'b', 'callback_data': 'home'}]])
         self.assertGreater(len(sends), 1)
         self.assertTrue(all(len(payload['text']) <= 4096 for payload in sends))
+        self.assertTrue(all(payload['text'].count('<blockquote>') == payload['text'].count('</blockquote>') for payload in sends))
         self.assertEqual(['reply_markup' in payload for payload in sends], [False] * (len(sends) - 1) + [True])
         self.assertEqual(last_id, len(sends))
         self.assertEqual(calls[0][0], 'editMessageText')

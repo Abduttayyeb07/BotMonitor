@@ -1,7 +1,9 @@
-"""Telegram HTML building blocks shared by every page: panels, log entries, splitting.
+"""Telegram HTML building blocks shared by every page.
 
-Everything dynamic is escaped on the way in, and every line closes its own tags,
-so text can be split at any line break and still be valid Telegram HTML.
+Pages are made of short "cards": a <blockquote> with a bold heading and tree lines
+(├ / └), the style of well-known Telegram bots. Everything dynamic is escaped on
+the way in, and no block contains a blank line, so a long page can be split at
+blank lines into several messages without breaking any tag.
 """
 from __future__ import annotations
 
@@ -13,8 +15,8 @@ from zoneinfo import ZoneInfo
 
 PKT = ZoneInfo("Asia/Karachi")
 MAX_MESSAGE = 4096
-RULE = "━━━━━━━━━━━━━━━━"
-THIN_RULE = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+
+Item = tuple  # (label, value) or (label, value, "code")
 
 
 def e(value: Any) -> str:
@@ -22,41 +24,55 @@ def e(value: Any) -> str:
     return html.escape(str(value), quote=False)
 
 
-Item = tuple  # (label, value) or (label, value, "code")
+def _value(item: Item) -> str:
+    return f"<code>{e(item[1])}</code>" if len(item) > 2 and item[2] == "code" else e(item[1])
 
 
-class Panel:
-    """A message built block by block: a titled header, then sections separated by blank lines."""
+def tree(items: Iterable[Item | None]) -> list[str]:
+    """'├ Label: value' lines, the last one '└'. Items that are None or have no value are left out."""
+    kept = [item for item in items if item and item[1] is not None and item[1] != ""]
+    return [f"{'└' if index == len(kept) - 1 else '├'} {e(item[0])}: {_value(item)}" for index, item in enumerate(kept)]
 
-    def __init__(self, icon: str, name: str):
-        self.blocks = [f"{icon} <b>{e(name)}</b>\n{RULE}"]
 
-    def add(self, html_block: str | None) -> "Panel":
-        """Append a block that is already valid HTML (callers escape their own values)."""
-        if html_block:
-            self.blocks.append(html_block)
+def card(heading: str, items: Iterable[Item | None], expandable: bool = False) -> str:
+    """A quoted card: bold heading, then tree lines. Empty when no item has a value."""
+    lines = tree(items)
+    return quote([f"<b>{heading}</b>", *lines], expandable) if lines else ""
+
+
+def grouped_card(heading: str, groups: Iterable[tuple[str, Iterable[Item | None]]], expandable: bool = False) -> str:
+    """One card with several titled groups, e.g. a container's Runtime and Environment."""
+    lines = [f"<b>{heading}</b>"]
+    for title, items in groups:
+        rows = tree(items)
+        if rows:
+            lines += [title, *rows]
+    return quote(lines, expandable) if len(lines) > 1 else ""
+
+
+def quote(lines: list[str], expandable: bool = False) -> str:
+    """Lines are already HTML. Expandable quotes start collapsed (for long lists)."""
+    body = "\n".join(line for line in lines if line)
+    return f"<blockquote expandable>{body}</blockquote>" if expandable else f"<blockquote>{body}</blockquote>"
+
+
+class Page:
+    """A message: a bold title with an optional italic subtitle, then blocks separated by blank lines."""
+
+    def __init__(self, icon: str, title: str, subtitle: str | None = None):
+        self.blocks = [f"{icon} <b>{e(title)}</b>" + (f"\n<i>{e(subtitle)}</i>" if subtitle else "")]
+
+    def add(self, block: str | None) -> "Page":
+        if block:
+            self.blocks.append(block)
         return self
 
-    def section(self, heading: str, items: Iterable[Item | None]) -> "Panel":
-        """'<b>Heading</b>' and one '• Label: value' line per item; items without a value are skipped."""
-        return self.add(section(heading, items))
-
-    def footer(self, now: datetime | None = None) -> "Panel":
+    def footer(self, now: datetime | None = None) -> "Page":
         stamp = (now or datetime.now(timezone.utc)).astimezone(PKT)
-        return self.add(f"<i>Last checked: {stamp.strftime('%I:%M %p').lstrip('0')} PKT</i>")
+        return self.add(f"<i>🕒 Checked {stamp.strftime('%I:%M %p').lstrip('0')} PKT</i>")
 
     def html(self) -> str:
         return "\n\n".join(self.blocks)
-
-
-def section(heading: str, items: Iterable[Item | None]) -> str:
-    lines = []
-    for item in items:
-        if not item or item[1] is None or item[1] == "":
-            continue
-        value = f"<code>{e(item[1])}</code>" if len(item) > 2 and item[2] == "code" else e(item[1])
-        lines.append(f"• {e(item[0])}: {value}")
-    return f"<b>{e(heading)}</b>\n" + "\n".join(lines) if lines else ""
 
 
 def ago(seconds: int | None) -> str | None:
@@ -69,135 +85,88 @@ def ago(seconds: int | None) -> str | None:
     return f"{seconds // 3600}h {seconds % 3600 // 60}m ago"
 
 
+def number(value: Any) -> str | None:
+    return f"{value:,}" if isinstance(value, int) else (None if value is None else str(value))
+
+
 def memory_size(value: float) -> str:
     """Bytes as `docker stats` shows them (1 MB = 1024 * 1024 bytes)."""
     return f"{value / 1024 ** 3:.1f} GB" if value >= 1024 ** 3 else f"{value / 1024 ** 2:.0f} MB"
 
 
-def number(value: Any) -> str | None:
-    return f"{value:,}" if isinstance(value, int) else (None if value is None else str(value))
-
-
 def split_html(text: str, limit: int = MAX_MESSAGE) -> list[str]:
-    """Split a message at blank lines (then single lines) so every part fits Telegram's limit."""
+    """Split a page into messages at blank lines; blocks never contain one, so tags stay whole."""
     if len(text) <= limit:
         return [text]
     parts: list[str] = []
-    current = ""
     for block in text.split("\n\n"):
-        pieces = [block] if len(block) <= limit else _split_lines(block, limit)
-        for piece in pieces:
-            if current and len(current) + 2 + len(piece) > limit:
-                parts.append(current)
-                current = piece
-            else:
-                current = f"{current}\n\n{piece}" if current else piece
-    if current:
-        parts.append(current)
+        if parts and len(parts[-1]) + 2 + len(block) <= limit:
+            parts[-1] += "\n\n" + block
+        else:
+            parts.append(block)
     return parts
 
 
-def _split_lines(block: str, limit: int) -> list[str]:
-    pieces, current = [], ""
-    for line in block.split("\n"):
-        if current and len(current) + 1 + len(line) > limit:
-            pieces.append(current)
-            current = line
-        else:
-            current = f"{current}\n{line}" if current else line
-    return pieces + ([current] if current else [])
-
-
-# --- Log entries --------------------------------------------------------------------
-#
-# Docker prefixes every line with an RFC 3339 timestamp. After it, only structure that
-# cannot be misread is pulled out: leading [TAG]s, and segments separated by ' | ' or
-# '; ', or key=value pairs after ' — '. Anything else is shown exactly as logged.
+# --- Logs: the dark code box ----------------------------------------------------------
 
 STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}) ")
-APP_STAMP = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[^\]]*\]\s*")
-TAG = re.compile(r"^\[([^\[\]\n]{1,40})\]\s*")
-# Keys are plain names (latest, backlog, 24hVol); anything with quotes, braces or colons is not a key.
-PAIR_KEY = re.compile(r"(?:^|\s)([A-Za-z0-9_][\w.\-/]*)=")
-PAIR_START = re.compile(r"^[A-Za-z0-9_][\w.\-/]*=")
-RAW_PIECE = 3000
+LONG_LINE = 1500
 
 
-def _pairs(text: str) -> list[tuple[str, str]]:
-    """'largest buy this cycle=5.5K ZIG threshold=1.0M ZIG' -> [('largest buy this cycle', '5.5K ZIG'), ...].
+def log_text(line: str, now: datetime | None = None) -> str:
+    """One log line for the code box: Docker's UTC stamp shown as short PKT time, text as logged.
 
-    The first key may be several words (everything before the first '='); later keys are single tokens.
+    Lines from an earlier day keep their date. Lines without a Docker stamp are left as they are.
     """
-    keys = list(PAIR_KEY.finditer(text))
-    if not keys:
-        return []
-    pairs = []
-    for index, match in enumerate(keys):
-        key = text[:match.end() - 1].strip() if index == 0 else match.group(1)
-        end = keys[index + 1].start() if index + 1 < len(keys) else len(text)
-        pairs.append((key, text[match.end():end].strip()))
-    return pairs
-
-
-def _segment_line(segment: str) -> str:
-    if PAIR_START.match(segment):
-        key, _, value = segment.partition("=")
-        return f"• {e(key[:1].upper() + key[1:])}: {e(value) if value else '(empty)'}"
-    return f"• {e(segment)}"
-
-
-def _raw(text: str) -> list[str]:
-    # Cut before escaping so an entity like &amp; is never split.
-    return [f"<code>{e(text[start:start + RAW_PIECE])}</code>" for start in range(0, len(text), RAW_PIECE)] or ["<code></code>"]
-
-
-def format_log_line(line: str) -> str:
-    stamp_match = STAMP.match(line)
+    match = STAMP.match(line)
     try:
-        stamp = datetime.fromisoformat(stamp_match.group(1)).replace(tzinfo=timezone.utc) if stamp_match else None
+        stamp = datetime.fromisoformat(match.group(1)).replace(tzinfo=timezone.utc).astimezone(PKT) if match else None
     except ValueError:
         stamp = None
     if stamp is None:
-        return "\n".join(_raw(line))
-    rest = APP_STAMP.sub("", line[stamp_match.end():].strip(), count=1)
-    tags = []
-    while (tag := TAG.match(rest)):
-        tags.append(tag.group(1))
-        rest = rest[tag.end():]
-    out = [f"🕒 <i>{stamp.astimezone(PKT).strftime('%d %b %Y · %H:%M:%S')} PKT</i>"]
-    if len(rest) > RAW_PIECE:
-        # A huge single line (a dumped payload or stack): keep the time and tags, show the text raw.
-        if tags:
-            out.append(" ".join(f"<b>{e(tag)}</b>" for tag in tags))
-        return "\n".join(out + _raw(rest))
-    separator = " | " if " | " in rest else "; " if "; " in rest and "=" in rest else None
-    if separator:
-        headline, *segments = [part.strip() for part in rest.split(separator)]
-        bullets = [_segment_line(segment) for segment in segments if segment]
-    elif " — " in rest and "=" in rest.split(" — ", 1)[1]:
-        headline, tail = rest.split(" — ", 1)
-        bullets = [f"• {e(key[:1].upper() + key[1:])}: {e(value) if value else '(empty)'}" for key, value in _pairs(tail)]
-    elif PAIR_START.match(rest):
-        headline = ""
-        bullets = [f"• {e(key[:1].upper() + key[1:])}: {e(value) if value else '(empty)'}" for key, value in _pairs(rest)]
-    else:
-        headline, bullets = rest, []
-    title_parts = [" ".join(f"<b>{e(tag)}</b>" for tag in tags), e(headline.strip())]
-    title = " · ".join(part for part in title_parts if part)
-    return "\n".join(out + ([title] if title else []) + bullets)
+        return line.rstrip()
+    today = (now or datetime.now(timezone.utc)).astimezone(PKT).date()
+    when = stamp.strftime("%H:%M:%S") if stamp.date() == today else stamp.strftime("%d %b %H:%M:%S")
+    return f"{when}  {line[match.end():].rstrip()}"
 
 
-def log_entries(raw: str) -> list[str]:
-    return [format_log_line(line) for line in (raw or "").splitlines() if line.strip()]
+def log_lines(raw: str, now: datetime | None = None) -> list[str]:
+    return [log_text(line, now) for line in (raw or "").splitlines() if line.strip()]
 
 
-def newest_that_fit(entries: list[str], room: int) -> list[str]:
-    """The newest whole entries that fit in `room` characters, oldest first. Entries are never cut."""
-    kept, used = [], 0
-    for entry in reversed(entries):
-        cost = len(entry) + (2 if kept else 0)
+def code_box(lines: list[str]) -> str:
+    return "<pre>" + e("\n".join(lines)) + "</pre>"
+
+
+def newest_lines_that_fit(lines: list[str], room: int) -> list[str]:
+    """The newest whole lines whose code box fits in `room` characters, oldest first."""
+    kept: list[str] = []
+    used = len("<pre></pre>")
+    for line in reversed(lines):
+        cost = len(e(line)) + (1 if kept else 0)
         if used + cost > room:
             break
-        kept.insert(0, entry)
+        kept.insert(0, line)
         used += cost
     return kept
+
+
+def log_messages(title_html: str, lines: list[str], limit: int = MAX_MESSAGE) -> list[str]:
+    """Lines packed into as few messages as needed, each with its own code box. Nothing is cut:
+    a single line too long for one message is split across code boxes, never dropped."""
+    pieces: list[str] = []
+    for line in lines:
+        pieces += [line[start:start + LONG_LINE] for start in range(0, len(line), LONG_LINE)] or [""]
+    messages: list[str] = []
+    current: list[str] = []
+    header = title_html + "\n\n"
+    for piece in pieces:
+        candidate = current + [piece]
+        if current and len((header if not messages else "") + code_box(candidate)) > limit:
+            messages.append((header if not messages else "") + code_box(current))
+            current = [piece]
+        else:
+            current = candidate
+    if current or not messages:
+        messages.append((header if not messages else "") + code_box(current or ["No recent logs."]))
+    return messages
