@@ -143,7 +143,8 @@ def live_usage(container: Any) -> dict[str, Any] | None:
     return {"memory": usage, "memory_limit": memory.get("limit"), "cpu_percent": cpu_percent}
 
 
-def _size(value: float) -> str:
+def size_text(value: float) -> str:
+    """Memory size the way `docker stats` counts it (1 MB = 1024 * 1024 bytes)."""
     return f"{value / 1_073_741_824:.1f} GB" if value >= 1_073_741_824 else f"{value / 1_048_576:.0f} MB"
 
 
@@ -152,8 +153,8 @@ def usage_lines(usage: dict[str, Any] | None) -> list[tuple[str, str]]:
         return []
     rows = []
     if usage.get("memory") is not None:
-        limit = f" of {_size(usage['memory_limit'])}" if usage.get("memory_limit") else ""
-        rows.append(("Memory", f"{_size(usage['memory'])}{limit}"))
+        limit = f" / {size_text(usage['memory_limit'])}" if usage.get("memory_limit") else ""
+        rows.append(("Memory", f"{size_text(usage['memory'])}{limit}"))
     if usage.get("cpu_percent") is not None:
         rows.append(("CPU", f"{usage['cpu_percent']:.1f}%"))
     return rows
@@ -171,39 +172,26 @@ def local_date(value: str | None, with_time: bool = True) -> str | None:
 
 
 def library_text(info: dict[str, Any]) -> str | None:
+    """'2 (+3 dev)' for the overview; None when no manifest was found."""
     libraries = info.get("libraries")
     if not libraries:
         return None
-    text = f"{libraries['libraries']} {'library' if libraries['libraries'] == 1 else 'libraries'}"
-    return text + (f" (+{libraries['dev_libraries']} dev)" if libraries["dev_libraries"] else "")
+    return f"{libraries['libraries']}" + (f" (+{libraries['dev_libraries']} dev)" if libraries["dev_libraries"] else "")
 
 
-def summary_line(info: dict[str, Any]) -> str:
-    """One compact line for the project page; unknown parts are left out."""
-    parts = []
-    if info.get("runtime"):
-        parts.append(f"🧱 {info['runtime']}")
-    if library_text(info):
-        parts.append(f"📦 {library_text(info)}")
-    created = local_date(info.get("created"), with_time=False)
-    if created:
-        parts.append(f"📅 {created}")
-    return "  •  ".join(parts)
+def dependency_text(info: dict[str, Any]) -> str | None:
+    """'2 production + 3 development' for the container page."""
+    libraries = info.get("libraries")
+    if not libraries:
+        return None
+    text = f"{libraries['libraries']} production"
+    return text + (f" + {libraries['dev_libraries']} development" if libraries["dev_libraries"] else "")
 
 
-def detail_lines(info: dict[str, Any]) -> list[tuple[str, str]]:
-    """(label, value) rows for the container page; unknown parts are left out."""
-    rows = []
-    if info.get("runtime"):
-        rows.append(("Stack", info["runtime"]))
-    if library_text(info):
-        rows.append(("Libraries", f"{library_text(info)} in {info['libraries']['manifest']}"))
-    if info.get("image"):
-        size = f" ({info['image_size'] / 1_000_000:.0f} MB)" if info.get("image_size") else ""
-        rows.append(("Image", f"{info['image']}{size}"))
-    for label, key in (("Built", "built"), ("Created", "created")):
-        if local_date(info.get(key)):
-            rows.append((label, local_date(info.get(key))))
-    if info.get("compose_project"):
-        rows.append(("Compose", f"{info['compose_project']} / {info.get('compose_service') or '-'}"))
-    return rows
+def runtime_row(info: dict[str, Any]) -> tuple[str, str] | None:
+    """('Node.js', '24.22.1') — the runtime as the label, its version as the value."""
+    runtime = info.get("runtime")
+    if not runtime:
+        return None
+    name, _, version = runtime.partition(" ")
+    return (name, version) if version else ("Stack", name)

@@ -371,16 +371,15 @@ class MonitoringRegressionTests(unittest.TestCase):
                               'Labels': {'com.docker.compose.project': 'sol-usdt-bot', 'com.docker.compose.service': 'monitor'}}})
 
     def test_bot_info_reads_node_version_and_counts_package_json_libraries(self):
-        from monitor.bot_info import container_info, detail_lines, summary_line
+        from monitor.bot_info import container_info, dependency_text, library_text, local_date, runtime_row
         package = json.dumps({'dependencies': {f'lib{i}': '^1.0.0' for i in range(8)}, 'devDependencies': {'jest': '^29'}})
         info = container_info(self.fake_container(['NODE_VERSION=20.11.1', 'TELEGRAM_BOT_TOKEN=secret'], {'/app/package.json': package}))
         self.assertEqual(info['runtime'], 'Node.js 20.11.1')
-        self.assertEqual((info['libraries']['libraries'], info['libraries']['dev_libraries']), (8, 1))
-        self.assertEqual(summary_line(info), '🧱 Node.js 20.11.1  •  📦 8 libraries (+1 dev)  •  📅 12 Oct 2026')
-        rows = dict(detail_lines(info))
-        self.assertEqual(rows['Created'], '12 Oct 2026, 14:03 PKT')
-        self.assertEqual(rows['Image'], 'sol-usdt-bot-monitor (412 MB)')
-        self.assertEqual(rows['Compose'], 'sol-usdt-bot / monitor')
+        self.assertEqual(runtime_row(info), ('Node.js', '20.11.1'))
+        self.assertEqual(library_text(info), '8 (+1 dev)')
+        self.assertEqual(dependency_text(info), '8 production + 1 development')
+        self.assertEqual(local_date(info['created']), '12 Oct 2026, 14:03 PKT')
+        self.assertEqual((info['compose_project'], info['compose_service']), ('sol-usdt-bot', 'monitor'))
 
     def test_bot_info_counts_python_requirements_and_skips_options_and_comments(self):
         from monitor.bot_info import container_info
@@ -390,15 +389,15 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertEqual(info['libraries']['libraries'], 3)
 
     def test_bot_info_for_database_skips_library_lookup_and_unknowns_are_left_out(self):
-        from monitor.bot_info import container_info, summary_line
+        from monitor.bot_info import container_info, library_text, runtime_row
         database = self.fake_container(['PG_VERSION=16.2'], working_dir='')
         info = container_info(database)
-        self.assertEqual(info['runtime'], 'PostgreSQL 16.2')
+        self.assertEqual(runtime_row(info), ('PostgreSQL', '16.2'))
         self.assertIsNone(info['libraries'])
+        self.assertIsNone(library_text(info))
         database.get_archive.assert_not_called()
-        self.assertEqual(summary_line(info), '🧱 PostgreSQL 16.2  •  📅 12 Oct 2026')
         bare = container_info(self.fake_container([], working_dir='/'))
-        self.assertEqual(summary_line(bare), '📅 12 Oct 2026')
+        self.assertIsNone(runtime_row(bare))
 
     def test_project_and_container_pages_show_bot_info_but_never_secrets(self):
         package = json.dumps({'dependencies': {f'lib{i}': '1' for i in range(8)}})
@@ -410,10 +409,10 @@ class MonitoringRegressionTests(unittest.TestCase):
              patch.object(panel, 'incident_history', return_value=(0, 0, 0)):
             project_text, _ = panel.pretty_project_page('bots_docker', 'sol-usdt')
             container_text, _ = panel.container_page('bots_docker', 'sol-usdt', 0)
-        self.assertIn('Node.js 20.11.1', project_text)
-        self.assertIn('8 libraries', project_text)
-        self.assertIn('<b>Libraries:</b> 8 libraries in package.json', container_text)
-        self.assertIn('<b>Built:</b> 12 Oct 2026, 14:02 PKT', container_text)
+        self.assertIn('• Node.js: 20.11.1', project_text)
+        self.assertIn('• Libraries: 8', project_text)
+        self.assertIn('• Dependencies: 8 production', container_text)
+        self.assertIn('• Built: 12 Oct 2026, 14:02 PKT', container_text)
         for text in (project_text, container_text):
             self.assertNotIn('supersecret123', text)
             self.assertNotIn('TELEGRAM_BOT_TOKEN', text)
@@ -429,7 +428,7 @@ class MonitoringRegressionTests(unittest.TestCase):
         }
         container = self.fake_container(['NODE_VERSION=20.11.1'])
         container.stats = Mock(return_value=stats)
-        self.assertEqual(usage_lines(live_usage(container)), [('Memory', '84 MB of 8.0 GB'), ('CPU', '1.2%')])
+        self.assertEqual(usage_lines(live_usage(container)), [('Memory', '84 MB / 8.0 GB'), ('CPU', '1.2%')])
         container.status = 'exited'
         self.assertIsNone(live_usage(container))
         container.status = 'running'
@@ -446,8 +445,137 @@ class MonitoringRegressionTests(unittest.TestCase):
             container.stats.assert_not_called()
             container_text, _ = panel.container_page('bots_docker', 'sol-usdt', 0)
         self.assertNotIn('Memory', project_text)
-        self.assertIn('<b>Memory:</b> 84 MB of 8.0 GB', container_text)
-        self.assertIn('<b>CPU:</b> 1.2%', container_text)
+        self.assertIn('<b>System Resources</b>\n• Memory: 84 MB / 8.0 GB\n• CPU: 1.2%', container_text)
+
+    # --- Telegram message formatting ----------------------------------------------
+
+    WHALE = '2026-10-23T11:14:32.123456789Z [2026-10-23T11:14:32.120Z] [Gate.io] monitoring — largest buy this cycle=6.7K ZIG threshold=1.0M ZIG 24hVol=95.1K USDT'
+
+    def test_log_line_is_split_into_time_tags_and_one_metric_per_line(self):
+        from monitor.formatting import render_log_entry
+        self.assertEqual(render_log_entry(self.WHALE),
+                         '🕒 <i>23 Oct · 16:14:32</i>\n<b>Gate.io</b> · monitoring\n'
+                         '• Largest buy this cycle: 6.7K ZIG\n• Threshold: 1.0M ZIG\n• 24hVol: 95.1K USDT')
+        sync = render_log_entry('2026-10-23T11:14:33Z [SYNC] SYNCED | ws slot 455995881 | rpc slot 455995880 | behind -1')
+        self.assertEqual(sync.splitlines()[1:], ['<b>SYNC</b> · SYNCED', '• ws slot 455995881', '• rpc slot 455995880', '• behind -1'])
+        semi = render_log_entry('2026-10-23T11:14:34Z HTTP backfill bsc USDT 100-200; latest=300; backlog=100')
+        self.assertEqual(semi.splitlines()[1:], ['HTTP backfill bsc USDT 100-200', '• Latest: 300', '• Backlog: 100'])
+
+    def test_log_special_characters_are_escaped_and_empty_metrics_are_marked_not_invented(self):
+        from monitor.formatting import render_log_entry
+        rendered = render_log_entry('2026-10-23T11:14:35Z [<script>] note= other=5 user=<b>&amp;')
+        self.assertIn('<b>&lt;script&gt;</b>', rendered)
+        self.assertIn('• User: &lt;b&gt;&amp;amp;', rendered)
+        self.assertIn('• Note: (empty)', rendered)
+        self.assertIn('• Other: 5', rendered)
+        self.assertNotIn('<script>', rendered)
+
+    def test_malformed_and_unparseable_log_lines_are_kept_raw(self):
+        from monitor.formatting import parse_log_line, render_log_entry
+        self.assertEqual(render_log_entry('Traceback (most recent call last): <oops> & more'),
+                         '<code>Traceback (most recent call last): &lt;oops&gt; &amp; more</code>')
+        self.assertEqual(render_log_entry('2026-99-99T99:99:99Z broken'), '<code>2026-99-99T99:99:99Z broken</code>')
+        json_line = parse_log_line('2026-10-23T11:14:36Z {"level":30,"msg":"started"}')
+        self.assertEqual((json_line['headline'], json_line['metrics']), ('{"level":30,"msg":"started"}', []))
+        plain = parse_log_line('2026-10-23T11:14:37Z [BLOCK] Live slot 455995882')
+        self.assertEqual((plain['tags'], plain['headline'], plain['metrics']), (['BLOCK'], 'Live slot 455995882', []))
+
+    def test_long_logs_keep_whole_newest_entries_and_report_what_was_left_out(self):
+        from monitor.formatting import render_logs, split_message, TELEGRAM_LIMIT
+        raw = '\n'.join(self.WHALE.replace('11:14:32', f'11:{minute:02d}:00') for minute in range(40))
+        rendered, shown, total = render_logs(raw, 1200)
+        self.assertEqual(total, 40)
+        self.assertLess(shown, total)
+        self.assertLessEqual(len(rendered), 1200)
+        self.assertTrue(rendered.endswith('95.1K USDT'), 'entries are kept whole')
+        self.assertEqual(rendered.split('\n\n')[-1].splitlines()[0], '🕒 <i>23 Oct · 16:39:00</i>', 'newest entry is last and kept')
+        huge = '2026-10-23T11:00:00Z ' + ('x' * 9000) + ' <end>'
+        from monitor.formatting import render_log_entry
+        messages = split_message(['header', render_log_entry(huge)])
+        self.assertTrue(all(len(message) <= TELEGRAM_LIMIT for message in messages))
+        self.assertIn('&lt;end&gt;', messages[-1], 'nothing is silently dropped')
+        raw_huge = render_log_entry('no timestamp ' + 'y' * 7000)
+        self.assertTrue(all(part.startswith('<code>') and part.endswith('</code>') for part in raw_huge.split('\n')))
+
+    def test_section_skips_unknown_values_and_escapes_everything(self):
+        from monitor.formatting import section, join_blocks
+        self.assertEqual(section('Info', [('A', 1), ('B', None), None, ('Image', 'a<b>', True)]),
+                         '<b>Info</b>\n• A: 1\n• Image: <code>a&lt;b&gt;</code>')
+        self.assertEqual(section('Empty', [('A', None)]), '')
+        self.assertEqual(join_blocks('one', '', 'two'), 'one\n\ntwo')
+
+    def test_container_page_has_all_sections_and_offers_full_logs(self):
+        container = self.fake_container(['NODE_VERSION=24.22.1'], {'/app/package.json': json.dumps({'dependencies': {'a': '1', 'b': '1'}, 'devDependencies': {'c': '1', 'd': '1', 'e': '1'}})})
+        container.logs = Mock(return_value=('\n'.join([self.WHALE] * 12)).encode())
+        container.stats = Mock(return_value={})
+        projects = {'bots_docker': {'items': [{'id': 'marketzig', 'name': 'Zig Whale Bot', 'containers': ['zig-whale-bot']}]}}
+        panel = TelegramBotPanel(None, ['1'], projects, allow_restart=True)
+        with patch.object(panel, 'container', return_value=container):
+            text, keyboard = panel.container_page('bots_docker', 'marketzig', 0)
+            full = panel.full_logs_messages('bots_docker', 'marketzig', 0)
+        for heading in ('Container Status', 'Application Information', 'Deployment Information', 'Recent Logs'):
+            self.assertIn(f'<b>{heading}</b>', text)
+        self.assertNotIn('System Resources', text, 'empty stats are left out, not shown as zero')
+        self.assertIn('• Stack: Node.js 24.22.1', text)
+        self.assertIn('• Dependencies: 2 production + 3 development', text)
+        self.assertLessEqual(len(text), 4096)
+        callbacks = [button['callback_data'] for row in keyboard for button in row]
+        self.assertIn('logs:bots_docker:marketzig:0', callbacks)
+        self.assertIn('restart-confirm:bots_docker:marketzig:0', callbacks)
+        self.assertIn('project:bots_docker:marketzig', callbacks)
+        self.assertTrue(all(len(message) <= 4096 for message in full))
+        self.assertEqual(sum(message.count('🕒') for message in full), 12)
+
+    def test_multi_container_project_lists_each_container_compactly(self):
+        projects = {'frontend': {'items': [{'id': 'lp', 'name': 'Liquidity Provider', 'containers': ['web', 'db', 'gone']}]}}
+        web = self.fake_container(['NODE_VERSION=20.11.1'], {'/app/package.json': '{"dependencies": {"a": "1"}}'}, name='web')
+        db = self.fake_container(['PG_VERSION=16.2'], working_dir='', name='db')
+        panel = TelegramBotPanel(None, ['1'], projects)
+        with patch.object(panel, 'container', side_effect=lambda name: {'web': web, 'db': db}.get(name)), \
+             patch.object(panel, 'incident_history', return_value=(3, 1, 2)):
+            text, keyboard = panel.pretty_project_page('frontend', 'lp')
+        self.assertIn('⚠️ <b>Status: 2/3 containers running</b>', text)
+        self.assertIn('🟢 <b>web</b>\n   Running · Uptime', text)
+        self.assertIn('Node.js 20.11.1 · 1 · Updated 12 Oct 2026', text)
+        self.assertIn('PostgreSQL 16.2 · Updated 12 Oct 2026', text)
+        self.assertIn('🔴 <b>gone</b>\n   Stopped or unavailable', text)
+        self.assertIn('<b>Incident History</b>\n• Total: 3\n• Active: 1\n• Recovered: 2', text)
+        self.assertEqual([row[0]['text'] for row in keyboard[:3]], ['🔎 View web', '🔎 View db', '🔎 View gone'])
+
+    def test_usage_ranks_projects_by_memory_top_ten(self):
+        projects = {'bots_docker': {'items': [
+            {'id': f'p{i}', 'name': f'Project {i}', 'containers': [f'c{i}']} for i in range(12)]}}
+        containers = {f'c{i}': self.fake_container([], name=f'c{i}') for i in range(12)}
+        for i, container in enumerate(containers.values()):
+            container.stats = Mock(return_value={
+                'memory_stats': {'usage': (i + 1) * 100 * 1_048_576, 'limit': 8 * 1_073_741_824, 'stats': {}},
+                'cpu_stats': {'cpu_usage': {'total_usage': 2}, 'system_cpu_usage': 200, 'online_cpus': 1},
+                'precpu_stats': {'cpu_usage': {'total_usage': 1}, 'system_cpu_usage': 100}})
+        panel = TelegramBotPanel(None, ['1'], projects)
+        memory = SimpleNamespace(total=16 * 1_073_741_824, available=8 * 1_073_741_824)
+        with patch.object(panel, 'container', side_effect=containers.get), \
+             patch('monitor.telegram_bot.psutil.virtual_memory', return_value=memory):
+            text = panel.usage_text()
+        self.assertIn('🥇 Project 11', text)
+        self.assertIn('🥈 Project 10', text)
+        self.assertIn('10. Project 2', text)
+        self.assertNotIn('Project 1</b>', text)
+        self.assertNotIn('Project 0', text)
+        self.assertIn('• Memory: 1.2 GB (7.3% of server)', text)
+        self.assertIn('• Containers: 1/1 running', text)
+        self.assertIn('• Memory: 8.0 GB of 16.0 GB (50%)', text)
+        self.assertLessEqual(len(text), 4096)
+
+    def test_send_splits_over_long_messages_and_keeps_buttons_on_the_last_part(self):
+        panel = TelegramBotPanel('token', ['1'], {})
+        sent = []
+        with patch.object(panel, 'api', side_effect=lambda method, payload, **_: sent.append(payload) or {'result': {'message_id': len(sent)}}):
+            message_id = panel.send('1', '\n\n'.join(f'<b>block {i}</b> ' + 'x' * 400 for i in range(20)), [[{'text': 'b', 'callback_data': 'home'}]])
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(len(payload['text']) <= 4096 for payload in sent))
+        self.assertNotIn('reply_markup', sent[0])
+        self.assertIn('reply_markup', sent[-1])
+        self.assertEqual(message_id, len(sent))
 
     def test_telegram_timeout_logs_one_line_without_traceback_but_other_errors_keep_it(self):
         import requests

@@ -10,9 +10,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 from contextlib import closing
 
+from concurrent.futures import ThreadPoolExecutor
+
 import docker
+import psutil
 import requests
-from .bot_info import container_info, detail_lines, live_usage, summary_line, usage_lines
+from .bot_info import container_info, dependency_text, library_text, live_usage, local_date, runtime_row, size_text, usage_lines
+from .formatting import (TELEGRAM_LIMIT, checked_footer, join_blocks, log_lines, render_log_entry, render_logs,
+                         section, split_message, title)
 from .docker_checks import inventory
 from .checks import read_systemd_snapshot
 from .removals import apply_removals, project_key, remove_item, removed_items, removed_keys, restore_item, service_key
@@ -200,20 +205,35 @@ class TelegramBotPanel:
             log.exception("Telegram API request failed: %s", method)
             return None
 
-    def send(self, chat_id: str, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> None:
-        payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-        if keyboard:
-            payload["reply_markup"] = {"inline_keyboard": keyboard}
-        self.api("sendMessage", payload)
+    @staticmethod
+    def chunks(text: str) -> list[str]:
+        # Pages are built from self-contained lines, so an over-long one splits safely at line breaks.
+        return [text] if len(text) <= TELEGRAM_LIMIT else split_message(text.split("\n\n"))
+
+    def send(self, chat_id: str, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> int | None:
+        """Send text (split if over Telegram's limit; buttons go on the last part). Returns the last message ID."""
+        message_id = None
+        parts = self.chunks(text)
+        for position, part in enumerate(parts):
+            payload: dict[str, Any] = {"chat_id": chat_id, "text": part, "parse_mode": "HTML"}
+            if keyboard and position == len(parts) - 1:
+                payload["reply_markup"] = {"inline_keyboard": keyboard}
+            data = self.api("sendMessage", payload)
+            message_id = ((data or {}).get("result") or {}).get("message_id", message_id)
+        return message_id
 
     def answer_callback(self, callback_id: str) -> None:
         self.api("answerCallbackQuery", {"callback_query_id": callback_id}, timeout=10)
 
     def edit(self, chat_id: str, message_id: int, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> None:
-        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML"}
+        """Edit in place; anything over Telegram's limit follows as extra messages, never cut off."""
+        first, *rest = self.chunks(text)
+        payload: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": first, "parse_mode": "HTML"}
         if keyboard:
             payload["reply_markup"] = {"inline_keyboard": keyboard}
         self.api("editMessageText", payload)
+        for part in rest:
+            self.send(chat_id, part)
 
     def group_keyboard(self) -> list[list[dict[str, str]]]:
         buttons = []
@@ -237,6 +257,7 @@ class TelegramBotPanel:
                 "/docker or /bots — Docker bot projects\n"
                 "/services — system services\n"
                 "/incidents — active incidents\n"
+                "/usage — top 10 projects by memory use\n"
                 "/removed — items removed from monitoring (restore)\n"
                 "/frontendhealth — frontend health report\n"
                 "/botshealth — bot health report\n"
@@ -267,6 +288,7 @@ class TelegramBotPanel:
             {"command": "docker", "description": "Show Docker bot projects"},
             {"command": "services", "description": "Show system services"},
             {"command": "incidents", "description": "Show active incidents"},
+            {"command": "usage", "description": "Top 10 projects by memory use"},
             {"command": "removed", "description": "Restore removed items"},
             {"command": "frontendhealth", "description": "Show frontend health report"},
             {"command": "botshealth", "description": "Show bot health report"},
@@ -362,56 +384,65 @@ class TelegramBotPanel:
         if not project:
             return "<b>Project not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
         containers = project.get("containers") or []
-        rows = []
-        running = 0
-        unhealthy = 0
-        for name in containers:
-            container = self.container(name)
-            if container is None:
-                rows.append(f"🟥 <b>{esc(name)}</b>\n   <i>Stopped or unavailable</i>")
-                continue
-            icon, status = short_status(container)
-            state = container.attrs.get("State", {})
-            if status == "RUNNING":
-                running += 1
-            if status == "UNHEALTHY":
-                unhealthy += 1
-            info = summary_line(self.bot_info(container))
-            rows.append(
-                f"{icon} <b>{esc(name)}</b>\n"
-                f"   <i>{esc(status.title())}  •  Uptime {uptime(state.get('StartedAt'))}  •  Restarts {container.attrs.get('RestartCount', 0)}</i>"
-                + (f"\n   {esc(info)}" if info else "")
-            )
-        total, active, recovered = self.incident_history(project_id, containers)
-        lines = [
-            f"📊 <b>{esc(project['name'])}</b>",
-            f"{self.health_bar(len(containers), running, unhealthy)}  <b>{running}/{len(containers)} running</b>",
-            "",
-            "\n\n".join(rows) if rows else "<i>No Docker containers configured.</i>",
-            "",
-            f"📚 <b>Incident history:</b> {total} total  •  {active} active  •  {recovered} recovered",
-        ]
+        snapshots = [(name, self.container(name)) for name in containers]
+        running = sum(1 for _, container in snapshots if container is not None and short_status(container)[1] == "RUNNING")
+        blocks = [title("📊", project["name"])]
+        if containers:
+            icon = "✅" if running == len(containers) else "⚠️" if running else "🔴"
+            blocks.append(f"{icon} <b>Status: {running}/{len(containers)} containers running</b>")
+        if len(snapshots) == 1:
+            # One container: the full layout, one property per line.
+            name, container = snapshots[0]
+            blocks.append(f"<b>Container:</b> <code>{esc(name)}</code>")
+            blocks.extend(self.container_overview_sections(container))
+        elif snapshots:
+            # Several containers: one compact, consistently laid-out block each.
+            blocks.append("<b>Containers</b>\n\n" + "\n\n".join(self.container_compact(name, container) for name, container in snapshots))
         services = project.get("services") or []
         if services:
-            lines.append("\n<b>Systemd services</b>")
+            service_lines = []
             for service in services:
-                details = self.systemd_status(service["unit"])
-                status = details.get("active_state", "unknown")
-                icon = "🟢" if status == "active" else "🔴"
-                lines.append(f"{icon} <b>{esc(service['name'])}</b>  <i>{esc(status.upper())}</i>")
-        container_buttons = [
-            {"text": f"🔎 {name[:22]}", "callback_data": f"container:{group_id}:{project_id}:{index}"}
-            for index, name in enumerate(containers)
-        ]
-        buttons = [container_buttons[index:index + 2] for index in range(0, len(container_buttons), 2)]
-        service_buttons = [
-            {"text": f"⚙️ {service['name'][:22]}", "callback_data": f"service:{group_id}:{project_id}:{index}"}
-            for index, service in enumerate(services)
-        ]
-        buttons.extend([service_buttons[index:index + 2] for index in range(0, len(service_buttons), 2)])
-        buttons.append([{"text": "🗑 Remove from monitoring", "callback_data": f"rm-confirm:{group_id}:{project_id}"}])
+                status = self.systemd_status(service["unit"]).get("active_state", "unknown")
+                service_lines.append(f"{'🟢' if status == 'active' else '🔴'} <b>{esc(service['name'])}</b> · {esc(status.upper())}")
+            blocks.append("<b>System Services</b>\n" + "\n".join(service_lines))
+        total, active, recovered = self.incident_history(project_id, containers)
+        blocks.append(section("Incident History", [("Total", total), ("Active", active), ("Recovered", recovered)]))
+        blocks.append(checked_footer())
+        buttons = [[{"text": f"🔎 View {name[:28]}", "callback_data": f"container:{group_id}:{project_id}:{index}"}]
+                   for index, name in enumerate(containers)]
+        buttons.extend([[{"text": f"⚙️ {service['name'][:28]}", "callback_data": f"service:{group_id}:{project_id}:{index}"}]
+                        for index, service in enumerate(services)])
+        buttons.append([{"text": "🗑 Remove from Monitoring", "callback_data": f"rm-confirm:{group_id}:{project_id}"}])
         buttons.append([{"text": "⬅️ Projects", "callback_data": f"group:{group_id}"}])
-        return "\n".join(lines), buttons
+        return join_blocks(*blocks), buttons
+
+    def container_overview_sections(self, container: Any) -> list[str]:
+        if container is None:
+            return [section("Runtime Information", [("Status", "🔴 Stopped or unavailable")])]
+        icon, status = short_status(container)
+        state = container.attrs.get("State", {})
+        info = self.bot_info(container)
+        return [
+            section("Runtime Information", [("Status", f"{icon} {status.title()}"),
+                                            ("Uptime", uptime(state.get("StartedAt"))),
+                                            ("Restarts", container.attrs.get("RestartCount", 0))]),
+            section("Environment", [runtime_row(info), ("Libraries", library_text(info)),
+                                    ("Last updated", local_date(info.get("created"), with_time=False))]),
+        ]
+
+    def container_compact(self, name: str, container: Any) -> str:
+        if container is None:
+            return f"🔴 <b>{esc(name)}</b>\n   Stopped or unavailable"
+        icon, status = short_status(container)
+        state = container.attrs.get("State", {})
+        info = self.bot_info(container)
+        lines = [f"{icon} <b>{esc(name)}</b>",
+                 f"   {esc(status.title())} · Uptime {esc(uptime(state.get('StartedAt')))} · Restarts {container.attrs.get('RestartCount', 0)}"]
+        updated = local_date(info.get("created"), with_time=False)
+        environment = [part for part in (info.get("runtime"), library_text(info), f"Updated {updated}" if updated else None) if part]
+        if environment:
+            lines.append("   " + esc(" · ".join(environment)))
+        return "\n".join(lines)
 
     def project_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
         project = self.project_by_id(group_id, project_id)
@@ -447,32 +478,105 @@ class TelegramBotPanel:
         name = names[index]
         container = self.container(name)
         if container is None:
-            text = f"🔴 <b>{esc(name)}</b>\n\n<b>Status:</b> DOWN\nContainer could not be found."
+            text = join_blocks(title("🔴", name), section("Container Status", [("Status", "DOWN")]),
+                               "Container could not be found.", checked_footer())
         else:
             icon, status = short_status(container)
             state = container.attrs.get("State", {})
-            health = state.get("Health", {}).get("Status", "not configured")
-            restarts = container.attrs.get("RestartCount", 0)
-            try:
-                raw_logs = container.logs(tail=12, timestamps=True).decode("utf-8", errors="replace")
-            except Exception as exc:
-                raw_logs = f"Unable to read logs: {exc}"
-            logs = esc(raw_logs[-2400:] or "No recent logs.")
-            rows = usage_lines(live_usage(container)) + detail_lines(self.bot_info(container))
-            details = "".join(f"<b>{label}:</b> {esc(value)}\n" for label, value in rows)
-            text = (f"{icon} <b>{esc(name)}</b>\n\n"
-                    f"<b>Status:</b> {esc(status)}\n"
-                    f"<b>Health:</b> {esc(health)}\n"
-                    f"<b>Uptime:</b> {esc(uptime(state.get('StartedAt')))}\n"
-                    f"<b>Restarts:</b> {restarts}\n"
-                    f"<b>Exit code:</b> {state.get('ExitCode', 'unknown')}\n\n"
-                    + (f"ℹ️ <b>Bot info</b>\n{details}\n" if details else "")
-                    + f"<b>Recent logs</b>\n<pre>{logs}</pre>")
-        buttons = [[{"text": "🔄 Refresh", "callback_data": f"container:{group_id}:{project_id}:{index}"}]]
+            health = state.get("Health", {}).get("Status") or "not configured"
+            info = self.bot_info(container)
+            usage = live_usage(container) or {}
+            image_size = info.get("image_size")
+            blocks = [
+                title(icon, name),
+                section("Container Status", [("Status", status), ("Health", health.capitalize()),
+                                             ("Uptime", uptime(state.get("StartedAt"))),
+                                             ("Restarts", container.attrs.get("RestartCount", 0)),
+                                             ("Exit Code", state.get("ExitCode", "unknown"))]),
+                section("System Resources", usage_lines(usage)),
+                section("Application Information", [
+                    ("Stack", info.get("runtime")), ("Dependencies", dependency_text(info)),
+                    ("Image", info.get("image"), True),
+                    ("Image Size", f"{image_size / 1_000_000:.0f} MB" if image_size else None)]),
+                section("Deployment Information", [
+                    ("Built", local_date(info.get("built"))), ("Created", local_date(info.get("created"))),
+                    ("Compose", f"{info['compose_project']} / {info.get('compose_service') or '-'}" if info.get("compose_project") else None, True)]),
+            ]
+            blocks.append(self.logs_block(container, budget=TELEGRAM_LIMIT - len(join_blocks(*blocks)) - 120))
+            blocks.append(checked_footer())
+            text = join_blocks(*blocks)
+        buttons = [[{"text": "🔄 Refresh", "callback_data": f"container:{group_id}:{project_id}:{index}"},
+                    {"text": "📜 Full logs", "callback_data": f"logs:{group_id}:{project_id}:{index}"}]]
         if self.allow_restart:
             buttons.append([{"text": "♻️ Restart container", "callback_data": f"restart-confirm:{group_id}:{project_id}:{index}"}])
         buttons.append([{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}])
         return text, buttons
+
+    def usage_text(self, limit: int = 10) -> str:
+        """Projects ranked by live memory use (all their containers summed), top `limit`."""
+        projects = [item for group in self.projects.values() for item in group.get("items", []) if item.get("containers")]
+        names = list(dict.fromkeys(name for item in projects for name in item["containers"]))
+        containers = {name: self.container(name) for name in names}
+        running = [name for name, container in containers.items() if container is not None and container.status == "running"]
+        # docker stats needs ~1-2 s per container, so they are sampled in parallel.
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            usage = dict(zip(running, pool.map(lambda name: live_usage(containers[name]), running)))
+        ranked = []
+        for item in projects:
+            measured = [usage[name] for name in item["containers"] if usage.get(name) and usage[name].get("memory") is not None]
+            if not measured:
+                continue
+            cpu = [entry["cpu_percent"] for entry in measured if entry.get("cpu_percent") is not None]
+            ranked.append({"name": item.get("name", item["id"]), "memory": sum(entry["memory"] for entry in measured),
+                           "cpu": sum(cpu) if cpu else None, "total": len(item["containers"]),
+                           "running": sum(1 for name in item["containers"] if name in running)})
+        ranked.sort(key=lambda row: row["memory"], reverse=True)
+        server = psutil.virtual_memory()
+        measured_total = sum(entry["memory"] for entry in usage.values() if entry and entry.get("memory") is not None)
+        blocks = [title("💾", f"Memory Usage — Top {limit} Projects"),
+                  section("Server", [("Memory", f"{size_text(server.total - server.available)} of {size_text(server.total)} "
+                                                f"({(server.total - server.available) / server.total * 100:.0f}%)"),
+                                     ("Monitored containers", f"{size_text(measured_total)} across {len(running)} running")])]
+        if not ranked:
+            blocks.append("<i>Could not read memory for any monitored container.</i>")
+        medals = {0: "🥇", 1: "🥈", 2: "🥉"}
+        for position, row in enumerate(ranked[:limit]):
+            heading = f"{medals.get(position, f'{position + 1}.')} {row['name']}"
+            blocks.append(section(heading, [
+                ("Memory", f"{size_text(row['memory'])} ({row['memory'] / server.total * 100:.1f}% of server)"),
+                ("CPU", f"{row['cpu']:.1f}%" if row["cpu"] is not None else None),
+                ("Containers", f"{row['running']}/{row['total']} running")]))
+        blocks.append(checked_footer())
+        return join_blocks(*blocks)
+
+    def logs_block(self, container: Any, budget: int) -> str:
+        """'Recent Logs' with the newest entries that fit; says so when older ones are left out."""
+        try:
+            raw = container.logs(tail=12, timestamps=True).decode("utf-8", errors="replace")
+        except Exception as exc:
+            return f"<b>Recent Logs</b>\n<i>Unable to read logs: {esc(exc)}</i>"
+        rendered, shown, total = render_logs(raw, max(budget, 0))
+        if not total:
+            return "<b>Recent Logs</b>\n<i>No recent logs.</i>"
+        notice = f"\n\n<i>Showing latest {shown} of {total} lines · tap 📜 Full logs for all</i>" if shown < total else ""
+        return f"<b>Recent Logs</b>\n\n{rendered or '<i>Latest entry is too long to show here.</i>'}{notice}"
+
+    def full_logs_messages(self, group_id: str, project_id: str, index: int, lines: int = 60) -> list[str]:
+        """Last `lines` log lines as one or more messages, each within Telegram's limit."""
+        project = self.project_by_id(group_id, project_id)
+        names = project.get("containers", []) if project else []
+        if not project or index < 0 or index >= len(names):
+            return ["<b>Container not found</b>"]
+        container = self.container(names[index])
+        if container is None:
+            return [join_blocks(title("📜", names[index]), "<i>Container could not be found.</i>")]
+        try:
+            raw = container.logs(tail=lines, timestamps=True).decode("utf-8", errors="replace")
+        except Exception as exc:
+            return [join_blocks(title("📜", names[index]), f"<i>Unable to read logs: {esc(exc)}</i>")]
+        entries = [render_log_entry(line) for line in log_lines(raw)] or ["<i>No recent logs.</i>"]
+        header = f"{title('📜', names[index])}\n<i>Last {len(log_lines(raw))} log lines</i>"
+        return split_message([header, *entries])
 
     def restart_confirm_page(self, group_id: str, project_id: str, index: int) -> tuple[str, list[list[dict[str, str]]]]:
         project = self.project_by_id(group_id, project_id)
@@ -509,17 +613,21 @@ class TelegramBotPanel:
         service = services[index]
         details = self.systemd_status(service["unit"])
         status = details.get("active_state", "unknown")
-        logs = (details.get("recent_logs") or "No recent journal logs.")[-2500:]
-        icon = "🟢" if status == "active" else "🔴"
-        text = (f"{icon} <b>{esc(service['name'])}</b>\n\n"
-                f"<b>Unit:</b> <code>{esc(service['unit'])}</code>\n"
-                f"<b>Status:</b> {esc(status.upper())}\n\n"
-                f"<b>Recent journal</b>\n<pre>{esc(logs)}</pre>")
+        blocks = [title("🟢" if status == "active" else "🔴", service["name"]),
+                  section("Service Status", [("Unit", service["unit"], True), ("Status", status.upper()),
+                                             ("Sub-state", details.get("sub_state"))])]
         if service["unit"] == "wallet-watchman.service":
             activity = details.get("activity") or {}
-            text += (f"\n\n<b>Wallets:</b> {esc(activity.get('wallet_count') or 'unknown')}"
-                     f"\n<b>Last reload:</b> {esc(activity.get('last_reload_at') or 'unknown')}"
-                     f"\n<b>RPC failures (10m):</b> {esc(activity.get('rpc_failures_10m') or 0)}")
+            blocks.append(section("Wallet Activity", [("Wallets", activity.get("wallet_count") or "unknown"),
+                                                      ("Last reload", activity.get("last_reload_at") or "unknown"),
+                                                      ("RPC failures (10m)", activity.get("rpc_failures_10m") or 0)]))
+        # Journal lines are not Docker lines, so they are shown as written, one per line.
+        journal, shown, total = render_logs(details.get("recent_logs") or "",
+                                            TELEGRAM_LIMIT - len(join_blocks(*blocks)) - 160)
+        notice = f"\n\n<i>Showing latest {shown} of {total} journal lines</i>" if shown < total else ""
+        blocks.append(f"<b>Recent Journal</b>\n\n{journal}{notice}" if total else "<b>Recent Journal</b>\n<i>No recent journal logs.</i>")
+        blocks.append(checked_footer())
+        text = join_blocks(*blocks)
         return text, [[{"text": "🔄 Refresh", "callback_data": f"service:{group_id}:{project_id}:{index}"}],
                       [{"text": "🗑 Remove from monitoring", "callback_data": f"rmsvc-confirm:{group_id}:{project_id}:{service['name']}"}],
                       [{"text": "⬅️ Services" if group_id == "bots_systemd" else "⬅️ Project",
@@ -551,6 +659,14 @@ class TelegramBotPanel:
                 self.send(chat_id, text, keyboard)
             elif command == "/incidents":
                 self.send(chat_id, self.active_incidents_text())
+            elif command == "/usage":
+                # Sampling every container takes a few seconds; show progress, then fill it in.
+                placeholder = self.send(chat_id, "⏳ <i>Measuring memory and CPU for all monitored containers…</i>")
+                text = self.usage_text()
+                if placeholder:
+                    self.edit(chat_id, placeholder, text)
+                else:
+                    self.send(chat_id, text)
             elif command == "/removed":
                 text, keyboard = self.removed_page()
                 self.send(chat_id, text, keyboard)
@@ -580,6 +696,12 @@ class TelegramBotPanel:
         elif data.startswith("container:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.container_page(group_id, project_id, int(index))
+        elif data.startswith("logs:"):
+            # Full logs arrive as new messages below, so the details page stays where it is.
+            _, group_id, project_id, index = data.split(":", 3)
+            for part in self.full_logs_messages(group_id, project_id, int(index)):
+                self.send(chat_id, part)
+            return
         elif data.startswith("restart-confirm:") and self.allow_restart:
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.restart_confirm_page(group_id, project_id, int(index))
