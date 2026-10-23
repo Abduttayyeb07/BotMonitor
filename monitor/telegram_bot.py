@@ -190,6 +190,10 @@ class TelegramBotPanel:
                 log.error("Telegram API %s failed: %s", method, data)
                 return None
             return data
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            # Routine network blips (long-poll timeouts, dropped connections): one line, no traceback.
+            log.warning("Telegram API %s unreachable (%s), will retry", method, type(exc).__name__)
+            return None
         except requests.RequestException:
             log.exception("Telegram API request failed: %s", method)
             return None

@@ -346,6 +346,20 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(result['internal_gap'], 2)
 
+    def test_telegram_timeout_logs_one_line_without_traceback_but_other_errors_keep_it(self):
+        import requests
+        panel = TelegramBotPanel('token', ['1'], {})
+        with patch('monitor.telegram_bot.requests.post', side_effect=requests.ReadTimeout('read timed out')), \
+             self.assertLogs('monitor.telegram_bot', level='WARNING') as logs:
+            self.assertIsNone(panel.api('getUpdates', {}))
+        self.assertEqual(len(logs.records), 1)
+        self.assertEqual(logs.records[0].levelname, 'WARNING')
+        self.assertIsNone(logs.records[0].exc_info)
+        with patch('monitor.telegram_bot.requests.post', side_effect=requests.HTTPError('500')), \
+             self.assertLogs('monitor.telegram_bot', level='ERROR') as logs:
+            self.assertIsNone(panel.api('sendMessage', {}))
+        self.assertIsNotNone(logs.records[0].exc_info)
+
     def test_nawa_falls_back_to_cc_status_then_abci_info_when_status_is_forbidden(self):
         import requests
         blocked_cc_status = False
