@@ -93,6 +93,16 @@ Removals are stored in SQLite (`removed_items`), so they survive restarts and
 work even though `config.yaml` is mounted read-only. `config.yaml` is not
 edited. Use `/removed` to list removed items and restore any of them.
 
+## Resource usage (`/usage`)
+
+`/usage` lists the top 10 projects by RAM, each with its CPU and disk use, plus
+server RAM, server disk and the total Docker disk. A project's disk is its image,
+the files its containers wrote, its named volumes and its Docker log files.
+Log sizes need the read-only `/var/lib/docker/containers` mount in
+`docker-compose.yml`; without it they are reported as not counted. Folders
+bind-mounted from the host (such as `./data`) are not counted. Disk figures
+come from `docker system df` and are cached for 10 minutes.
+
 ## Outage detection
 
 Configured containers that are removed (including `docker compose down`) count

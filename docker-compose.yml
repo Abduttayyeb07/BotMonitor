@@ -13,6 +13,8 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Read-only: lets /usage measure each bot's Docker log file size.
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
     network_mode: host
     read_only: true
     tmpfs:

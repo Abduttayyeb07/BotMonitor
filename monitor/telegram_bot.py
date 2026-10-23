@@ -16,6 +16,7 @@ import psutil
 import requests
 from .bot_details import bot_details, frontend_details
 from .bot_info import container_info, live_usage, local_date
+from .disk_usage import docker_disk, docker_total, log_size, project_disk
 from .view import (MAX_MESSAGE, Page, card, code_box, grouped_card, log_lines, log_messages, memory_size,
                    newest_lines_that_fit, split_html)
 from .docker_checks import inventory
@@ -28,6 +29,13 @@ log = logging.getLogger(__name__)
 
 def esc(value: Any) -> str:
     return html.escape(str(value), quote=False)
+
+
+def disk_split(disk: dict[str, Any]) -> str | None:
+    """'vol 11.1 GB · img 1.1 GB · logs 90 MB' — only the parts that use space, biggest first."""
+    parts = [(label, disk[key]) for key, label in (("volumes", "vol"), ("images", "img"), ("logs", "logs"), ("data", "data"))
+             if disk.get(key)]
+    return " · ".join(f"{label} {memory_size(size)}" for label, size in sorted(parts, key=lambda part: -part[1])) or None
 
 
 def short_status(container: Any) -> tuple[str, str]:
@@ -74,6 +82,7 @@ class TelegramBotPanel:
         self.inventory_cache = {}
         self.inventory_at = 0.0
         self.info_cache: dict[str, dict[str, Any]] = {}
+        self.disk_cache: tuple[float, dict[str, Any]] | None = None
         self.stop_event = threading.Event()
         self.offset = 0
         self.api_url = f"https://api.telegram.org/bot{token}" if token else ""
@@ -541,6 +550,8 @@ class TelegramBotPanel:
         with ThreadPoolExecutor(max_workers=10) as pool:
             measured = {name: usage for name, usage in zip(live, pool.map(lambda name: live_usage(containers[name]), live))
                         if usage and usage.get("memory") is not None}
+        snapshot = self.disk_snapshot()
+        logs = {name: log_size(container) for name, container in containers.items() if container is not None}
         rows = []
         for item in projects:
             parts = [measured[name] for name in item["containers"] if name in measured]
@@ -548,21 +559,43 @@ class TelegramBotPanel:
                 cpu = [part["cpu_percent"] for part in parts if part.get("cpu_percent") is not None]
                 rows.append((sum(part["memory"] for part in parts), sum(cpu) if cpu else None,
                              sum(1 for name in item["containers"] if name in live), len(item["containers"]),
-                             item.get("name") or item["id"]))
+                             item.get("name") or item["id"],
+                             project_disk(item["containers"], snapshot, logs) if snapshot else None))
         rows.sort(key=lambda row: row[0], reverse=True)
-        server = psutil.virtual_memory()
-        used = server.total - server.available
-        page = Page("💾", "Memory Usage", f"Top {top} projects by memory")
-        page.add(card("🖥 Server", [("Used", f"{memory_size(used)} of {memory_size(server.total)} ({used / server.total * 100:.0f}%)"),
-                                   ("Monitored", f"{memory_size(sum(u['memory'] for u in measured.values()))} in {len(live)} containers")]))
+        ram = psutil.virtual_memory()
+        ram_used = ram.total - ram.available
+        disk = psutil.disk_usage("/")
+        page = Page("💾", "Resource Usage", f"Top {top} projects by RAM")
+        page.add(card("🖥 Server", [
+            ("RAM", f"{memory_size(ram_used)} of {memory_size(ram.total)} ({ram_used / ram.total * 100:.0f}%)"),
+            ("Disk", f"{memory_size(disk.used)} of {memory_size(disk.total)} ({disk.percent:.0f}%)"),
+            ("Docker disk", memory_size(docker_total(snapshot, logs)) if snapshot else "unavailable"),
+            ("Monitored bots", f"{memory_size(sum(u['memory'] for u in measured.values()))} RAM · {len(live)} containers")]))
         if not rows:
             page.add("<i>Could not read memory for any monitored container.</i>")
-        for rank, (memory, cpu, up, total, name) in enumerate(rows[:top], start=1):
+        for rank, (memory, cpu, up, total, name, used_disk) in enumerate(rows[:top], start=1):
             badge = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank}.")
-            page.add(card(f"{badge} {esc(name)}", [("Memory", f"{memory_size(memory)} · {memory / server.total * 100:.1f}%"),
-                                                  ("CPU", f"{cpu:.1f}%" if cpu is not None else None),
-                                                  ("Containers", f"{up}/{total} running")]))
+            page.add(card(f"{badge} {esc(name)}", [
+                ("RAM", f"{memory_size(memory)} · {memory / ram.total * 100:.1f}%"),
+                ("CPU", f"{cpu:.1f}%" if cpu is not None else None),
+                ("Disk", memory_size(used_disk["total"]) if used_disk else None),
+                ("Disk split", disk_split(used_disk) if used_disk else None),
+                ("Containers", f"{up}/{total} running")]))
+        if snapshot and not any(size is not None for size in logs.values()):
+            page.add("<i>Log files not counted: the Docker log folder is not mounted (see docker-compose.yml).</i>")
         return page.footer().html()
+
+    def disk_snapshot(self) -> dict[str, Any] | None:
+        """`docker system df` data, cached for 10 minutes because it takes a few seconds to collect."""
+        if self.disk_cache and time.monotonic() - self.disk_cache[0] < 600:
+            return self.disk_cache[1]
+        try:
+            snapshot = docker_disk()
+        except Exception:
+            log.exception("Docker disk usage unavailable")
+            return self.disk_cache[1] if self.disk_cache else None
+        self.disk_cache = (time.monotonic(), snapshot)
+        return snapshot
 
     def restart_confirm_page(self, group_id: str, project_id: str, index: int) -> tuple[str, list[list[dict[str, str]]]]:
         project = self.project_by_id(group_id, project_id)

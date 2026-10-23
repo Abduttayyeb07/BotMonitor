@@ -90,8 +90,12 @@ def number(value: Any) -> str | None:
 
 
 def memory_size(value: float) -> str:
-    """Bytes as `docker stats` shows them (1 MB = 1024 * 1024 bytes)."""
-    return f"{value / 1024 ** 3:.1f} GB" if value >= 1024 ** 3 else f"{value / 1024 ** 2:.0f} MB"
+    """Bytes as `docker stats`, `free -h` and `df -h` count them (1 GB = 1024³ bytes)."""
+    if value >= 1024 ** 4:
+        return f"{value / 1024 ** 4:.1f} TB"
+    if value >= 1024 ** 3:
+        return f"{value / 1024 ** 3:.1f} GB"
+    return f"{value / 1024 ** 2:.0f} MB"
 
 
 def split_html(text: str, limit: int = MAX_MESSAGE) -> list[str]:

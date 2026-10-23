@@ -625,16 +625,62 @@ class MonitoringRegressionTests(unittest.TestCase):
                 'cpu_stats': {'cpu_usage': {'total_usage': 2}, 'system_cpu_usage': 200, 'online_cpus': 1},
                 'precpu_stats': {'cpu_usage': {'total_usage': 1}, 'system_cpu_usage': 100}})
             containers[f'c{i}'] = container
+        GB = 1024 ** 3
+        snapshot = {
+            'containers': {f'c{i}': {'image_id': 'img', 'data': 10 * 1024 ** 2, 'volumes': ['vol11'] if i == 11 else []} for i in range(12)},
+            'images': {'img': 1 * GB}, 'volumes': {'vol11': 5 * GB}, 'layers': 1 * GB}
         panel, patched = self.panel_for(projects, containers)
-        with patched, patch('monitor.telegram_bot.psutil.virtual_memory', return_value=SimpleNamespace(total=16 * 1024 ** 3, available=8 * 1024 ** 3)):
+        with patched, patch('monitor.telegram_bot.psutil.virtual_memory', return_value=SimpleNamespace(total=16 * GB, available=8 * GB)), \
+             patch('monitor.telegram_bot.psutil.disk_usage', return_value=SimpleNamespace(total=1.4 * 1024 * GB, used=765 * GB, percent=57.0)), \
+             patch('monitor.telegram_bot.docker_disk', return_value=snapshot) as disk, \
+             patch('monitor.telegram_bot.log_size', side_effect=lambda container: 90 * 1024 ** 2 if container.name == 'c11' else None):
             text = panel.usage_text()
-        self.assertIn('<blockquote><b>🥇 Project 11</b>\n├ Memory: 1.2 GB · 7.3%\n├ CPU: 1.0%\n└ Containers: 1/1 running</blockquote>', text)
+            panel.usage_text()
+        disk.assert_called_once()  # cached for the second /usage
+        self.assertIn('<blockquote><b>🥇 Project 11</b>\n├ RAM: 1.2 GB · 7.3%\n├ CPU: 1.0%\n├ Disk: 6.1 GB\n'
+                      '├ Disk split: vol 5.0 GB · img 1.0 GB · logs 90 MB · data 10 MB\n└ Containers: 1/1 running</blockquote>', text)
+        self.assertIn('├ Disk: 1.0 GB\n├ Disk split: img 1.0 GB · data 10 MB', text, 'unknown logs are left out, not shown as 0')
         self.assertIn('<b>🥈 Project 10</b>', text)
         self.assertIn('<b>10. Project 2</b>', text)
         self.assertNotIn('Project 1<', text)
         self.assertNotIn('Project 0<', text)
-        self.assertIn('├ Used: 8.0 GB of 16.0 GB (50%)', text)
+        self.assertIn('├ RAM: 8.0 GB of 16.0 GB (50%)\n├ Disk: 765.0 GB of 1.4 TB (57%)\n├ Docker disk: 6.2 GB', text)
+        self.assertNotIn('Log files not counted', text)
         self.assertLessEqual(len(text), 4096)
+
+    def test_usage_without_log_mount_or_docker_disk_says_so(self):
+        container = self.fake_container([], name='c0')
+        container.stats = Mock(return_value={'memory_stats': {'usage': 1024 ** 3, 'stats': {}}, 'cpu_stats': {}, 'precpu_stats': {}})
+        panel, patched = self.panel_for({'bots_docker': {'items': [{'id': 'p', 'name': 'P', 'containers': ['c0']}]}}, {'c0': container})
+        snapshot = {'containers': {'c0': {'image_id': 'i', 'data': 0, 'volumes': []}}, 'images': {'i': 1024 ** 3}, 'volumes': {}, 'layers': 1024 ** 3}
+        with patched, patch('monitor.telegram_bot.docker_disk', return_value=snapshot), patch('monitor.telegram_bot.log_size', return_value=None):
+            text = panel.usage_text()
+        self.assertIn('Log files not counted', text)
+        panel.disk_cache = None
+        with patched, patch('monitor.telegram_bot.docker_disk', side_effect=RuntimeError('df failed')):
+            text = panel.usage_text()
+        self.assertIn('├ Docker disk: unavailable', text)
+        self.assertIn('├ RAM: 1.0 GB', text, 'RAM still shown when disk data is missing')
+
+    def test_project_disk_counts_shared_images_and_volumes_once_and_unknown_volumes_not_at_all(self):
+        from monitor.disk_usage import project_disk, docker_total
+        snapshot = {'containers': {'a': {'image_id': 'i', 'data': 5, 'volumes': ['v', 'unmeasured']},
+                                   'b': {'image_id': 'i', 'data': 7, 'volumes': ['v']}},
+                    'images': {'i': 100}, 'volumes': {'v': 1000, 'unmeasured': -1}, 'layers': 100}
+        self.assertEqual(project_disk(['a', 'b'], snapshot, {'a': 3, 'b': None}),
+                         {'volumes': 1000, 'images': 100, 'data': 12, 'logs': 3, 'total': 1115})
+        self.assertIsNone(project_disk(['a'], snapshot, {})['logs'], 'no log data -> unknown, not 0')
+        self.assertEqual(docker_total(snapshot, {'a': 3}), 100 + 12 + 1000 + 3)
+
+    def test_log_size_adds_rotated_files_and_is_unknown_without_the_mount(self):
+        from monitor.disk_usage import log_size
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'abc-json.log'
+            path.write_bytes(b'x' * 100)
+            (Path(directory) / 'abc-json.log.1').write_bytes(b'x' * 50)
+            self.assertEqual(log_size(SimpleNamespace(attrs={'LogPath': str(path)})), 150)
+        self.assertIsNone(log_size(SimpleNamespace(attrs={'LogPath': '/nope/missing-json.log'})))
+        self.assertIsNone(log_size(SimpleNamespace(attrs={})))
 
     def test_long_pages_are_sent_in_parts_with_buttons_kept(self):
         panel = TelegramBotPanel('token', ['1'], {})
