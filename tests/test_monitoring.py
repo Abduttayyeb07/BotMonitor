@@ -420,6 +420,35 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertLess(len(container_text), 4096)
         self.assertEqual(container.get_archive.call_count, 1, 'manifest is read once and cached')
 
+    def test_live_usage_matches_docker_stats_math_and_shows_on_container_page_only(self):
+        from monitor.bot_info import live_usage, usage_lines
+        stats = {
+            'memory_stats': {'usage': 100 * 1_048_576, 'limit': 8 * 1_073_741_824, 'stats': {'inactive_file': 16 * 1_048_576}},
+            'cpu_stats': {'cpu_usage': {'total_usage': 2_000_000_000}, 'system_cpu_usage': 500_000_000_000, 'online_cpus': 4},
+            'precpu_stats': {'cpu_usage': {'total_usage': 1_850_000_000}, 'system_cpu_usage': 450_000_000_000},
+        }
+        container = self.fake_container(['NODE_VERSION=20.11.1'])
+        container.stats = Mock(return_value=stats)
+        self.assertEqual(usage_lines(live_usage(container)), [('Memory', '84 MB of 8.0 GB'), ('CPU', '1.2%')])
+        container.status = 'exited'
+        self.assertIsNone(live_usage(container))
+        container.status = 'running'
+        container.stats = Mock(side_effect=RuntimeError('stats unavailable'))
+        self.assertEqual(usage_lines(live_usage(container)), [])
+        # Shown on the container page; the project page must not pay the 1-2 s stats cost.
+        container.stats = Mock(return_value=stats)
+        container.logs = Mock(return_value=b'')
+        projects = {'bots_docker': {'items': [{'id': 'sol-usdt', 'name': 'Sol USDT', 'containers': ['sol-usdt-monitor']}]}}
+        panel = TelegramBotPanel(None, ['1'], projects)
+        with patch.object(panel, 'container', return_value=container), \
+             patch.object(panel, 'incident_history', return_value=(0, 0, 0)):
+            project_text, _ = panel.pretty_project_page('bots_docker', 'sol-usdt')
+            container.stats.assert_not_called()
+            container_text, _ = panel.container_page('bots_docker', 'sol-usdt', 0)
+        self.assertNotIn('Memory', project_text)
+        self.assertIn('<b>Memory:</b> 84 MB of 8.0 GB', container_text)
+        self.assertIn('<b>CPU:</b> 1.2%', container_text)
+
     def test_telegram_timeout_logs_one_line_without_traceback_but_other_errors_keep_it(self):
         import requests
         panel = TelegramBotPanel('token', ['1'], {})

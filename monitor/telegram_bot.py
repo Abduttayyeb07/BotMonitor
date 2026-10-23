@@ -12,7 +12,7 @@ from contextlib import closing
 
 import docker
 import requests
-from .bot_info import container_info, detail_lines, summary_line
+from .bot_info import container_info, detail_lines, live_usage, summary_line, usage_lines
 from .docker_checks import inventory
 from .checks import read_systemd_snapshot
 from .removals import apply_removals, project_key, remove_item, removed_items, removed_keys, restore_item, service_key
@@ -458,7 +458,8 @@ class TelegramBotPanel:
             except Exception as exc:
                 raw_logs = f"Unable to read logs: {exc}"
             logs = esc(raw_logs[-2400:] or "No recent logs.")
-            details = "".join(f"<b>{label}:</b> {esc(value)}\n" for label, value in detail_lines(self.bot_info(container)))
+            rows = usage_lines(live_usage(container)) + detail_lines(self.bot_info(container))
+            details = "".join(f"<b>{label}:</b> {esc(value)}\n" for label, value in rows)
             text = (f"{icon} <b>{esc(name)}</b>\n\n"
                     f"<b>Status:</b> {esc(status)}\n"
                     f"<b>Health:</b> {esc(health)}\n"

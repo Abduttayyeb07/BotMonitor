@@ -118,6 +118,47 @@ def container_info(container: Any) -> dict[str, Any]:
     return info
 
 
+def live_usage(container: Any) -> dict[str, Any] | None:
+    """Current memory and CPU, as `docker stats` computes them. Not cached: it is live.
+
+    Docker samples twice about a second apart to get a CPU delta, so this takes ~1-2 s.
+    """
+    if getattr(container, "status", None) != "running":
+        return None
+    try:
+        stats = container.stats(stream=False)
+    except Exception:
+        return None
+    memory = stats.get("memory_stats") or {}
+    details = memory.get("stats") or {}
+    usage = memory.get("usage")
+    if usage is not None:
+        # Page cache is reclaimable, so `docker stats` leaves it out (cgroup v2, then v1 names).
+        usage -= details.get("inactive_file", details.get("total_inactive_file", 0))
+    cpu, previous = stats.get("cpu_stats") or {}, stats.get("precpu_stats") or {}
+    cpu_delta = (cpu.get("cpu_usage") or {}).get("total_usage", 0) - (previous.get("cpu_usage") or {}).get("total_usage", 0)
+    system_delta = cpu.get("system_cpu_usage", 0) - previous.get("system_cpu_usage", 0)
+    cpus = cpu.get("online_cpus") or len((cpu.get("cpu_usage") or {}).get("percpu_usage") or []) or 1
+    cpu_percent = cpu_delta / system_delta * cpus * 100 if cpu_delta >= 0 and system_delta > 0 else None
+    return {"memory": usage, "memory_limit": memory.get("limit"), "cpu_percent": cpu_percent}
+
+
+def _size(value: float) -> str:
+    return f"{value / 1_073_741_824:.1f} GB" if value >= 1_073_741_824 else f"{value / 1_048_576:.0f} MB"
+
+
+def usage_lines(usage: dict[str, Any] | None) -> list[tuple[str, str]]:
+    if not usage:
+        return []
+    rows = []
+    if usage.get("memory") is not None:
+        limit = f" of {_size(usage['memory_limit'])}" if usage.get("memory_limit") else ""
+        rows.append(("Memory", f"{_size(usage['memory'])}{limit}"))
+    if usage.get("cpu_percent") is not None:
+        rows.append(("CPU", f"{usage['cpu_percent']:.1f}%"))
+    return rows
+
+
 def local_date(value: str | None, with_time: bool = True) -> str | None:
     # Docker reports UTC with nanoseconds ("2026-10-12T09:03:12.123456789Z"); seconds are enough.
     if not value or value.startswith("0001"):
