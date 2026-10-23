@@ -12,6 +12,7 @@ from contextlib import closing
 
 import docker
 import requests
+from .bot_info import container_info, detail_lines, summary_line
 from .docker_checks import inventory
 from .checks import read_systemd_snapshot
 from .removals import apply_removals, project_key, remove_item, removed_items, removed_keys, restore_item, service_key
@@ -67,6 +68,7 @@ class TelegramBotPanel:
         self.bot_report_config = bot_report_config or {}
         self.inventory_cache = {}
         self.inventory_at = 0.0
+        self.info_cache: dict[str, dict[str, Any]] = {}
         self.stop_event = threading.Event()
         self.offset = 0
         self.api_url = f"https://api.telegram.org/bot{token}" if token else ""
@@ -310,6 +312,17 @@ class TelegramBotPanel:
             log.error('Telegram container inventory unavailable')
             return None
 
+    def bot_info(self, container: Any) -> dict[str, Any]:
+        """Stack/library facts, cached per container ID (a recreated container gets a new ID)."""
+        key = getattr(container, "id", None) or container.name
+        if key not in self.info_cache:
+            try:
+                self.info_cache[key] = container_info(container)
+            except Exception:
+                log.exception("Could not read bot info for %s", getattr(container, "name", key))
+                return {}
+        return self.info_cache[key]
+
     def systemd_status(self, unit: str) -> dict[str, Any]:
         try:
             return read_systemd_snapshot("/data/systemd-status.json").get("services", {}).get(unit, {})
@@ -363,9 +376,11 @@ class TelegramBotPanel:
                 running += 1
             if status == "UNHEALTHY":
                 unhealthy += 1
+            info = summary_line(self.bot_info(container))
             rows.append(
                 f"{icon} <b>{esc(name)}</b>\n"
                 f"   <i>{esc(status.title())}  •  Uptime {uptime(state.get('StartedAt'))}  •  Restarts {container.attrs.get('RestartCount', 0)}</i>"
+                + (f"\n   {esc(info)}" if info else "")
             )
         total, active, recovered = self.incident_history(project_id, containers)
         lines = [
@@ -442,14 +457,16 @@ class TelegramBotPanel:
                 raw_logs = container.logs(tail=12, timestamps=True).decode("utf-8", errors="replace")
             except Exception as exc:
                 raw_logs = f"Unable to read logs: {exc}"
-            logs = esc(raw_logs[-2800:] or "No recent logs.")
+            logs = esc(raw_logs[-2400:] or "No recent logs.")
+            details = "".join(f"<b>{label}:</b> {esc(value)}\n" for label, value in detail_lines(self.bot_info(container)))
             text = (f"{icon} <b>{esc(name)}</b>\n\n"
                     f"<b>Status:</b> {esc(status)}\n"
                     f"<b>Health:</b> {esc(health)}\n"
                     f"<b>Uptime:</b> {esc(uptime(state.get('StartedAt')))}\n"
                     f"<b>Restarts:</b> {restarts}\n"
                     f"<b>Exit code:</b> {state.get('ExitCode', 'unknown')}\n\n"
-                    f"<b>Recent logs</b>\n<pre>{logs}</pre>")
+                    + (f"ℹ️ <b>Bot info</b>\n{details}\n" if details else "")
+                    + f"<b>Recent logs</b>\n<pre>{logs}</pre>")
         buttons = [[{"text": "🔄 Refresh", "callback_data": f"container:{group_id}:{project_id}:{index}"}]]
         if self.allow_restart:
             buttons.append([{"text": "♻️ Restart container", "callback_data": f"restart-confirm:{group_id}:{project_id}:{index}"}])

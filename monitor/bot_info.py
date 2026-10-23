@@ -1,0 +1,168 @@
+"""Read-only facts about a container for the Telegram pages.
+
+Stack and runtime version come from the version variables that official base
+images set (NODE_VERSION, PYTHON_VERSION, ...). Only those variables are read;
+other environment values hold tokens and keys and are never touched. The
+library count comes from the app's package.json / requirements.txt /
+pyproject.toml, copied out of the container through Docker's archive API, so
+nothing is executed inside the bot.
+"""
+from __future__ import annotations
+
+import io
+import json
+import tarfile
+import tomllib
+from datetime import datetime, timezone
+from typing import Any
+from zoneinfo import ZoneInfo
+
+PKT = ZoneInfo("Asia/Karachi")
+
+# First match wins, so app runtimes come before servers and databases.
+RUNTIME_ENV = (
+    ("NODE_VERSION", "Node.js"), ("BUN_VERSION", "Bun"), ("PYTHON_VERSION", "Python"),
+    ("GOLANG_VERSION", "Go"), ("JAVA_VERSION", "Java"), ("RUBY_VERSION", "Ruby"), ("PHP_VERSION", "PHP"),
+    ("NGINX_VERSION", "nginx"), ("CADDY_VERSION", "Caddy"), ("HTTPD_VERSION", "Apache"),
+    ("PG_VERSION", "PostgreSQL"), ("REDIS_VERSION", "Redis"), ("MONGO_VERSION", "MongoDB"), ("MYSQL_VERSION", "MySQL"),
+)
+# Off-the-shelf servers and databases have no app manifest worth looking for.
+NO_APP_RUNTIMES = {"nginx", "Caddy", "Apache", "PostgreSQL", "Redis", "MongoDB", "MySQL"}
+MANIFESTS = ("package.json", "requirements.txt", "pyproject.toml")
+APP_DIRS = ("/app", "/usr/src/app", "/home/node/app")
+MAX_MANIFEST_BYTES = 512_000
+
+
+def _runtime(env: list[str]) -> str | None:
+    values = {}
+    for entry in env or []:
+        key, _, value = entry.partition("=")
+        values[key] = value  # only RUNTIME_ENV keys are ever looked up below
+    for key, label in RUNTIME_ENV:
+        if values.get(key):
+            return f"{label} {values[key]}"
+    return None
+
+
+def _read_file(container: Any, path: str) -> str | None:
+    try:
+        stream, stat = container.get_archive(path)
+        if int(stat.get("size", 0)) > MAX_MANIFEST_BYTES:
+            return None
+        with tarfile.open(fileobj=io.BytesIO(b"".join(stream))) as archive:
+            member = archive.next()
+            if member is None or not member.isfile():
+                return None
+            handle = archive.extractfile(member)
+            return handle.read(MAX_MANIFEST_BYTES).decode("utf-8", errors="replace") if handle else None
+    except Exception:
+        return None
+
+
+def count_libraries(manifest: str, text: str) -> tuple[int, int] | None:
+    """(runtime libraries, dev libraries) declared in a manifest."""
+    try:
+        if manifest == "package.json":
+            data = json.loads(text)
+            return len(data.get("dependencies") or {}), len(data.get("devDependencies") or {})
+        if manifest == "requirements.txt":
+            lines = [line.split("#", 1)[0].strip() for line in text.splitlines()]
+            return len([line for line in lines if line and not line.startswith("-")]), 0
+        if manifest == "pyproject.toml":
+            data = tomllib.loads(text)
+            if "dependencies" in data.get("project", {}):
+                return len(data["project"]["dependencies"]), 0
+            poetry = data.get("tool", {}).get("poetry", {})
+            runtime = [name for name in poetry.get("dependencies", {}) if name.lower() != "python"]
+            dev = poetry.get("group", {}).get("dev", {}).get("dependencies", {})
+            return len(runtime), len(dev)
+    except (ValueError, TypeError, AttributeError, tomllib.TOMLDecodeError):
+        return None
+    return None
+
+
+def _libraries(container: Any, working_dir: str) -> dict[str, Any] | None:
+    dirs = [working_dir] if working_dir and working_dir != "/" else []
+    dirs += [path for path in APP_DIRS if path not in dirs]
+    for directory in dirs:
+        for manifest in MANIFESTS:
+            text = _read_file(container, f"{directory.rstrip('/')}/{manifest}")
+            counts = count_libraries(manifest, text) if text is not None else None
+            if counts is not None:
+                return {"manifest": manifest, "libraries": counts[0], "dev_libraries": counts[1]}
+    return None
+
+
+def container_info(container: Any) -> dict[str, Any]:
+    attrs = container.attrs or {}
+    config = attrs.get("Config") or {}
+    labels = config.get("Labels") or {}
+    runtime = _runtime(config.get("Env") or [])
+    info: dict[str, Any] = {
+        "runtime": runtime,
+        "created": attrs.get("Created"),
+        "image": config.get("Image"),
+        "compose_project": labels.get("com.docker.compose.project"),
+        "compose_service": labels.get("com.docker.compose.service"),
+        "built": None, "image_size": None, "libraries": None,
+    }
+    try:
+        image = container.image.attrs or {}
+        info["built"], info["image_size"] = image.get("Created"), image.get("Size")
+    except Exception:
+        pass
+    if not runtime or runtime.split(" ", 1)[0] not in NO_APP_RUNTIMES:
+        info["libraries"] = _libraries(container, config.get("WorkingDir") or "")
+        if info["libraries"] and not runtime:
+            info["runtime"] = "Node.js" if info["libraries"]["manifest"] == "package.json" else "Python"
+    return info
+
+
+def local_date(value: str | None, with_time: bool = True) -> str | None:
+    # Docker reports UTC with nanoseconds ("2026-10-12T09:03:12.123456789Z"); seconds are enough.
+    if not value or value.startswith("0001"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value[:19]).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return parsed.astimezone(PKT).strftime("%d %b %Y, %H:%M PKT" if with_time else "%d %b %Y")
+
+
+def library_text(info: dict[str, Any]) -> str | None:
+    libraries = info.get("libraries")
+    if not libraries:
+        return None
+    text = f"{libraries['libraries']} {'library' if libraries['libraries'] == 1 else 'libraries'}"
+    return text + (f" (+{libraries['dev_libraries']} dev)" if libraries["dev_libraries"] else "")
+
+
+def summary_line(info: dict[str, Any]) -> str:
+    """One compact line for the project page; unknown parts are left out."""
+    parts = []
+    if info.get("runtime"):
+        parts.append(f"🧱 {info['runtime']}")
+    if library_text(info):
+        parts.append(f"📦 {library_text(info)}")
+    created = local_date(info.get("created"), with_time=False)
+    if created:
+        parts.append(f"📅 {created}")
+    return "  •  ".join(parts)
+
+
+def detail_lines(info: dict[str, Any]) -> list[tuple[str, str]]:
+    """(label, value) rows for the container page; unknown parts are left out."""
+    rows = []
+    if info.get("runtime"):
+        rows.append(("Stack", info["runtime"]))
+    if library_text(info):
+        rows.append(("Libraries", f"{library_text(info)} in {info['libraries']['manifest']}"))
+    if info.get("image"):
+        size = f" ({info['image_size'] / 1_000_000:.0f} MB)" if info.get("image_size") else ""
+        rows.append(("Image", f"{info['image']}{size}"))
+    for label, key in (("Built", "built"), ("Created", "created")):
+        if local_date(info.get(key)):
+            rows.append((label, local_date(info.get(key))))
+    if info.get("compose_project"):
+        rows.append(("Compose", f"{info['compose_project']} / {info.get('compose_service') or '-'}"))
+    return rows

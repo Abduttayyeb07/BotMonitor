@@ -346,6 +346,80 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(result['internal_gap'], 2)
 
+    # --- Bot info on the Telegram pages ------------------------------------------
+
+    @staticmethod
+    def fake_container(env, files=None, working_dir='/app', name='sol-usdt-monitor'):
+        import io, tarfile, docker
+        files = files or {}
+        def get_archive(path):
+            if path not in files:
+                raise docker.errors.NotFound('missing')
+            data = files[path].encode()
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode='w') as archive:
+                member = tarfile.TarInfo(path.rsplit('/', 1)[-1])
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+            return iter([buffer.getvalue()]), {'size': len(data)}
+        return SimpleNamespace(
+            id=name + '-id', name=name, status='running', get_archive=Mock(side_effect=get_archive),
+            image=SimpleNamespace(attrs={'Created': '2026-10-12T09:02:00.123456789Z', 'Size': 412_000_000}),
+            attrs={'Created': '2026-10-12T09:03:12.987654321Z', 'RestartCount': 0,
+                   'State': {'Status': 'running', 'StartedAt': '2026-10-20T04:15:00Z'},
+                   'Config': {'Env': env, 'WorkingDir': working_dir, 'Image': 'sol-usdt-bot-monitor',
+                              'Labels': {'com.docker.compose.project': 'sol-usdt-bot', 'com.docker.compose.service': 'monitor'}}})
+
+    def test_bot_info_reads_node_version_and_counts_package_json_libraries(self):
+        from monitor.bot_info import container_info, detail_lines, summary_line
+        package = json.dumps({'dependencies': {f'lib{i}': '^1.0.0' for i in range(8)}, 'devDependencies': {'jest': '^29'}})
+        info = container_info(self.fake_container(['NODE_VERSION=20.11.1', 'TELEGRAM_BOT_TOKEN=secret'], {'/app/package.json': package}))
+        self.assertEqual(info['runtime'], 'Node.js 20.11.1')
+        self.assertEqual((info['libraries']['libraries'], info['libraries']['dev_libraries']), (8, 1))
+        self.assertEqual(summary_line(info), '🧱 Node.js 20.11.1  •  📦 8 libraries (+1 dev)  •  📅 12 Oct 2026')
+        rows = dict(detail_lines(info))
+        self.assertEqual(rows['Created'], '12 Oct 2026, 14:03 PKT')
+        self.assertEqual(rows['Image'], 'sol-usdt-bot-monitor (412 MB)')
+        self.assertEqual(rows['Compose'], 'sol-usdt-bot / monitor')
+
+    def test_bot_info_counts_python_requirements_and_skips_options_and_comments(self):
+        from monitor.bot_info import container_info
+        requirements = 'docker>=7.0\n# comment\n-r base.txt\n\npsutil==6.0  # pinned\nrequests\n'
+        info = container_info(self.fake_container(['PYTHON_VERSION=3.12.4'], {'/srv/requirements.txt': requirements}, working_dir='/srv'))
+        self.assertEqual(info['runtime'], 'Python 3.12.4')
+        self.assertEqual(info['libraries']['libraries'], 3)
+
+    def test_bot_info_for_database_skips_library_lookup_and_unknowns_are_left_out(self):
+        from monitor.bot_info import container_info, summary_line
+        database = self.fake_container(['PG_VERSION=16.2'], working_dir='')
+        info = container_info(database)
+        self.assertEqual(info['runtime'], 'PostgreSQL 16.2')
+        self.assertIsNone(info['libraries'])
+        database.get_archive.assert_not_called()
+        self.assertEqual(summary_line(info), '🧱 PostgreSQL 16.2  •  📅 12 Oct 2026')
+        bare = container_info(self.fake_container([], working_dir='/'))
+        self.assertEqual(summary_line(bare), '📅 12 Oct 2026')
+
+    def test_project_and_container_pages_show_bot_info_but_never_secrets(self):
+        package = json.dumps({'dependencies': {f'lib{i}': '1' for i in range(8)}})
+        container = self.fake_container(['NODE_VERSION=20.11.1', 'TELEGRAM_BOT_TOKEN=supersecret123'], {'/app/package.json': package})
+        container.logs = Mock(return_value=b'2026-10-23T10:00:00Z [BLOCK] Live slot 1\n')
+        projects = {'bots_docker': {'items': [{'id': 'sol-usdt', 'name': 'Sol USDT', 'containers': ['sol-usdt-monitor']}]}}
+        panel = TelegramBotPanel(None, ['1'], projects)
+        with patch.object(panel, 'container', return_value=container), \
+             patch.object(panel, 'incident_history', return_value=(0, 0, 0)):
+            project_text, _ = panel.pretty_project_page('bots_docker', 'sol-usdt')
+            container_text, _ = panel.container_page('bots_docker', 'sol-usdt', 0)
+        self.assertIn('Node.js 20.11.1', project_text)
+        self.assertIn('8 libraries', project_text)
+        self.assertIn('<b>Libraries:</b> 8 libraries in package.json', container_text)
+        self.assertIn('<b>Built:</b> 12 Oct 2026, 14:02 PKT', container_text)
+        for text in (project_text, container_text):
+            self.assertNotIn('supersecret123', text)
+            self.assertNotIn('TELEGRAM_BOT_TOKEN', text)
+        self.assertLess(len(container_text), 4096)
+        self.assertEqual(container.get_archive.call_count, 1, 'manifest is read once and cached')
+
     def test_telegram_timeout_logs_one_line_without_traceback_but_other_errors_keep_it(self):
         import requests
         panel = TelegramBotPanel('token', ['1'], {})
