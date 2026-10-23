@@ -32,9 +32,9 @@ def esc(value: Any) -> str:
 
 
 def disk_split(disk: dict[str, Any]) -> str | None:
-    """'vol 11.1 GB · img 1.1 GB · logs 90 MB' — only the parts that use space, biggest first."""
+    """'vol 11.1 GB · img 1.1 GB · logs 90 MB' — only parts of at least 1 KB, biggest first."""
     parts = [(label, disk[key]) for key, label in (("volumes", "vol"), ("images", "img"), ("logs", "logs"), ("data", "data"))
-             if disk.get(key)]
+             if (disk.get(key) or 0) >= 1024]
     return " · ".join(f"{label} {memory_size(size)}" for label, size in sorted(parts, key=lambda part: -part[1])) or None
 
 

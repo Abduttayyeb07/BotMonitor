@@ -648,6 +648,15 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertNotIn('Log files not counted', text)
         self.assertLessEqual(len(text), 4096)
 
+    def test_small_disk_parts_show_in_kb_and_empty_ones_are_hidden(self):
+        from monitor.telegram_bot import disk_split
+        from monitor.view import memory_size
+        self.assertEqual(memory_size(300 * 1024), '300 KB')
+        self.assertEqual(memory_size(5 * 1024 ** 2), '5 MB')
+        self.assertEqual(disk_split({'volumes': 10 * 1024 ** 3, 'images': 0, 'logs': 200 * 1024, 'data': 500}),
+                         'vol 10.0 GB · logs 200 KB', 'no "0 MB" parts: tiny ones in KB, under 1 KB hidden')
+        self.assertIsNone(disk_split({'volumes': 0, 'images': 0, 'logs': None, 'data': 0}))
+
     def test_usage_without_log_mount_or_docker_disk_says_so(self):
         container = self.fake_container([], name='c0')
         container.stats = Mock(return_value={'memory_stats': {'usage': 1024 ** 3, 'stats': {}}, 'cpu_stats': {}, 'precpu_stats': {}})

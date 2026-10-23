@@ -95,7 +95,9 @@ def memory_size(value: float) -> str:
         return f"{value / 1024 ** 4:.1f} TB"
     if value >= 1024 ** 3:
         return f"{value / 1024 ** 3:.1f} GB"
-    return f"{value / 1024 ** 2:.0f} MB"
+    if value >= 1024 ** 2:
+        return f"{value / 1024 ** 2:.0f} MB"
+    return f"{value / 1024:.0f} KB"  # small sizes would otherwise read as "0 MB"
 
 
 def split_html(text: str, limit: int = MAX_MESSAGE) -> list[str]:
