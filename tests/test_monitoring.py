@@ -581,7 +581,8 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertTrue(logs.startswith('<pre>') and '</pre>' in logs, 'logs are in the dark code box')
         self.assertIn('[Gate.io] monitoring — largest buy this cycle=6.7K ZIG threshold=1.0M ZIG 24hVol=95.1K USDT', logs,
                       'log text is shown exactly as logged')
-        self.assertTrue(logs.startswith('<pre>16:14:32  [2026-10-23T11:14:32.120Z]'), 'Docker UTC stamp becomes PKT time')
+        # The date is shown too when the line is from an earlier day, so allow either form.
+        self.assertRegex(logs, r'^<pre>(23 Oct )?16:14:32  \[2026-10-23T11:14:32\.120Z\]', 'Docker UTC stamp becomes PKT time')
         self.assertLessEqual(len(text), 4096)
         callbacks = [button['callback_data'] for row in keyboard for button in row]
         for expected in ('container:bots_docker:marketzig:0', 'logs:bots_docker:marketzig:0',
@@ -647,6 +648,31 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertIn('├ RAM: 8.0 GB of 16.0 GB (50%)\n├ Disk: 765.0 GB of 1.4 TB (57%)\n├ Docker disk: 6.2 GB', text)
         self.assertNotIn('Log files not counted', text)
         self.assertLessEqual(len(text), 4096)
+
+    def test_cpu_alert_needs_sustained_high_usage(self):
+        from monitor.checks import host_checks
+        thresholds = {'cpu_warning_percent': 90, 'cpu_sustain_checks': 3}
+        state = {}
+        memory = SimpleNamespace(percent=10.0)
+        disk = SimpleNamespace(percent=30.0)
+        def run(cpu):
+            with patch('monitor.checks.psutil.virtual_memory', return_value=memory), \
+                 patch('monitor.checks.psutil.disk_usage', return_value=disk), \
+                 patch('monitor.checks.psutil.cpu_percent', return_value=cpu):
+                return [item['type'] for item in host_checks(thresholds, state)]
+        self.assertEqual(run(97.0), [], 'one spike does not alert')
+        self.assertEqual(run(95.0), [], 'two in a row still do not')
+        self.assertEqual(run(30.0), [], 'a normal sample resets the count')
+        self.assertEqual(run(95.0), [])
+        self.assertEqual(run(96.0), [])
+        self.assertEqual(run(99.0), ['HIGH_CPU'], 'third high sample in a row alerts')
+        self.assertEqual(run(92.0), ['HIGH_CPU'], 'stays open while CPU stays high')
+        self.assertEqual(run(40.0), [], 'clears once CPU drops')
+        with patch('monitor.checks.psutil.virtual_memory', return_value=memory), \
+             patch('monitor.checks.psutil.disk_usage', return_value=disk), \
+             patch('monitor.checks.psutil.cpu_percent', return_value=95.0):
+            self.assertEqual([item['type'] for item in host_checks({'cpu_warning_percent': 90})], ['HIGH_CPU'],
+                             'without state (old callers) a single sample still alerts')
 
     def test_small_disk_parts_show_in_kb_and_empty_ones_are_hidden(self):
         from monitor.telegram_bot import disk_split

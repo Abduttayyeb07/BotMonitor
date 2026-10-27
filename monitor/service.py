@@ -216,6 +216,7 @@ def main() -> None:
     summary_every = max(1, int(config.get("summary_interval_seconds", 300) / max(interval, 1)))
     outage_window = OutageWindow()
     sol_watch = SolSyncWatch()
+    host_state: dict[str, int] = {}  # consecutive high-CPU polls, for cpu_sustain_checks
     report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True})
     bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True})
     default_report_times = ["11:00", "23:00"]
@@ -236,7 +237,7 @@ def main() -> None:
                      len(applied_removals), len(config.get("docker", {}).get("containers") or []),
                      len(config.get("systemd", {}).get("services") or []))
         active = []
-        findings = host_checks(config.get("thresholds", {}))
+        findings = host_checks(config.get("thresholds", {}), host_state)
         findings += docker_checks(config.get("docker", {}))
         findings += log_checks(config.get("docker", {}), log_cursors)
         findings += systemd_checks(config.get("systemd", {}), config.get("systemd_status_path", "/data/systemd-status.json"))

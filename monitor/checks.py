@@ -26,7 +26,13 @@ def read_systemd_snapshot(status_path: str, max_age_seconds: int = 60) -> dict[s
     return snapshot
 
 
-def host_checks(thresholds: dict[str, Any]) -> list[dict[str, str]]:
+def host_checks(thresholds: dict[str, Any], state: dict[str, int] | None = None) -> list[dict[str, str]]:
+    """Memory, disk and CPU findings for the host.
+
+    CPU alerts only after `cpu_sustain_checks` high samples in a row, so a short
+    spike (a build, a restart) does not open an incident. `state` carries that
+    count from one poll to the next; without it every high sample alerts.
+    """
     findings = []
     memory = psutil.virtual_memory().percent
     disk = psutil.disk_usage("/").percent
@@ -39,7 +45,13 @@ def host_checks(thresholds: dict[str, Any]) -> list[dict[str, str]]:
         findings.append({"project": "host", "service": "disk", "type": "DISK_FULL", "severity": "CRITICAL", "message": f"Root disk usage is {disk:.1f}%"})
     elif disk >= thresholds.get("disk_warning_percent", 80):
         findings.append({"project": "host", "service": "disk", "type": "DISK_FULL", "severity": "WARNING", "message": f"Root disk usage is {disk:.1f}%"})
-    if cpu >= thresholds.get("cpu_warning_percent", 90):
+    high_cpu = cpu >= thresholds.get("cpu_warning_percent", 90)
+    if state is not None:
+        state["cpu_high_checks"] = state.get("cpu_high_checks", 0) + 1 if high_cpu else 0
+        sustained = state["cpu_high_checks"] >= max(1, int(thresholds.get("cpu_sustain_checks", 3)))
+    else:
+        sustained = high_cpu
+    if sustained:
         findings.append({"project": "host", "service": "cpu", "type": "HIGH_CPU", "severity": "WARNING", "message": f"CPU usage is {cpu:.1f}%"})
     return findings
 
