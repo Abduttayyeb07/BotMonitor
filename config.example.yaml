@@ -302,8 +302,8 @@ docker:
     - name: arkive
       project: arkive
       critical: true
-      memory_warning_mb: 4096
-      memory_critical_mb: 6144
+      memory_warning_mb: 5120
+      memory_critical_mb: 8192
     - name: arkive-postgres
       project: arkive
       critical: true
