@@ -138,6 +138,12 @@ thresholds:
   memory_critical_percent: 95
   cpu_warning_percent: 90
   cpu_sustain_checks: 3
+  # Per-container RAM alert, read once a minute; alerts after N high readings in a row.
+  # Override per container with memory_warning_mb / memory_critical_mb under docker.containers.
+  container_memory_warning_mb: 1536
+  container_memory_critical_mb: 3072
+  container_memory_sustain_checks: 3
+  container_memory_interval_seconds: 60
 
 cooldowns:
   default_seconds: 900
@@ -296,6 +302,8 @@ docker:
     - name: arkive
       project: arkive
       critical: true
+      memory_warning_mb: 4096
+      memory_critical_mb: 6144
     - name: arkive-postgres
       project: arkive
       critical: true

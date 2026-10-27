@@ -27,7 +27,7 @@ def normalize(message: str) -> str:
 
 def fingerprint(project: str, service: str, incident_type: str, message: str) -> str:
     if incident_type in {'CONTAINER_DOWN', 'CONTAINER_UNHEALTHY', 'PROJECT_DOWN', 'SYSTEMD_DOWN',
-                         'SYSTEMD_COLLECTOR_MISSING', 'SYSTEMD_ACTIVITY_STALE', 'SYSTEMD_RPC_FAILURE', 'SOL_SYNC_LAG'}:
+                         'SYSTEMD_COLLECTOR_MISSING', 'SYSTEMD_ACTIVITY_STALE', 'SYSTEMD_RPC_FAILURE', 'SOL_SYNC_LAG', 'CONTAINER_HIGH_MEMORY'}:
         message = incident_type
     raw = "|".join((project, service, incident_type, normalize(message)))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]

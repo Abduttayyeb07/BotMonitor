@@ -103,6 +103,20 @@ Log sizes need the read-only `/var/lib/docker/containers` mount in
 bind-mounted from the host (such as `./data`) are not counted. Disk figures
 come from `docker system df` and are cached for 10 minutes.
 
+## Memory alerts, real-time events and mutes
+
+- **Per-container RAM:** each running container's memory is read once a minute. Three high
+  readings in a row open a WARNING (default 1.5 GB) or CRITICAL (3 GB) incident. Override per
+  container with `memory_warning_mb` / `memory_critical_mb` under `docker.containers`.
+- **Docker events:** the monitor listens to Docker's event stream and checks immediately when a
+  container dies, runs out of memory, starts or turns unhealthy, instead of waiting for the
+  next 5-second poll. A crash that restarts on its own before an incident opens is reported as
+  "crashed and restarted" (at most once per container per 10 minutes). A requested
+  `docker stop` / `compose down` is not a crash.
+- **Mutes:** `🔕 Mute` on a bot's page, or `🔕 Mute 1h` under any alert, silences that project's
+  messages for 1h / 4h / 24h. Incidents are still tracked; one still open when the mute ends is
+  alerted then. `/muted` lists active mutes.
+
 ## Outage detection
 
 Configured containers that are removed (including `docker compose down`) count

@@ -12,7 +12,8 @@ from typing import Any, Callable
 from .reports import (DEFAULT_BEP20_CONTAINER, DEFAULT_ETH_USDT_CONTAINER, frontend_endpoint_results,
                       frontend_report_items, highbuy_monitor_results, mdf_tracker_results,
                       nawa_finance_redeemer_results, nawa_valdora_results, sheets_sync_results, sol_usdt_results,
-                      stake_unstake_results, tokenx_vault_results, usdt_backfill_results, wallet_monitor_results,
+                      stake_unstake_results, system_service_results, tokenx_vault_results, usdt_backfill_results,
+                      wallet_monitor_results,
                       zig_usd_alerts_results, zig_whale_exchange_results, zigchain_bot_results)
 from .view import ago, card, e, number, quote
 
@@ -160,6 +161,32 @@ def bot_details(project: dict[str, Any], bot_reports: dict[str, Any]) -> str | N
     except Exception as exc:
         log.warning("bot details check failed: %s (%s: %s)", key, type(exc).__name__, exc)
         return unavailable("🩺 Bot Health", exc)
+
+
+SERVICE_CHECK_NAMES = {"wallet-watchman.service": "Wallet Watchman", "zigchain-exporter.service": "Zigchain Exporter"}
+
+
+def service_details(unit: str, config: dict[str, Any], status: dict[str, Any]) -> str | None:
+    """A system service's own health (from the system service check) and, for Wallet Watchman, its activity."""
+    blocks = []
+    name = SERVICE_CHECK_NAMES.get(unit)
+    if name:
+        try:
+            result = system_service_results(config)
+        except Exception as exc:
+            log.warning("service details check failed: %s (%s: %s)", unit, type(exc).__name__, exc)
+            blocks.append(unavailable("🩺 Service Health", exc))
+        else:
+            row = next((item for item in result.get("services", []) if item["name"] == name), None)
+            if row:
+                blocks.append(card("🩺 Service Health", [("Status", HEALTHY if row["ok"] else ATTENTION),
+                                                         ("Summary", row.get("summary")), ("Issue", row.get("error") or None)]))
+    if unit == "wallet-watchman.service":
+        activity = status.get("activity") or {}
+        blocks.append(card("👛 Wallet Activity", [("Wallets", activity.get("wallet_count") or "unknown"),
+                                                 ("Last reload", activity.get("last_reload_at") or "unknown"),
+                                                 ("RPC failures (10m)", activity.get("rpc_failures_10m") or 0)]))
+    return "\n\n".join(block for block in blocks if block) or None
 
 
 def frontend_details(project: dict[str, Any], frontend_config: dict[str, Any], projects: dict[str, Any]) -> str | None:

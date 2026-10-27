@@ -14,10 +14,11 @@ from concurrent.futures import ThreadPoolExecutor
 import docker
 import psutil
 import requests
-from .bot_details import bot_details, frontend_details
+from .bot_details import bot_details, frontend_details, service_details
 from .bot_info import container_info, live_usage, local_date
 from .disk_usage import docker_disk, docker_total, log_size, project_disk
-from .view import (MAX_MESSAGE, Page, card, code_box, grouped_card, log_lines, log_messages, memory_size,
+from .mutes import MUTE_CHOICES, active_mutes, mute, unmute
+from .view import (MAX_MESSAGE, PKT, Page, card, code_box, grouped_card, log_lines, log_messages, memory_size,
                    newest_lines_that_fit, split_html)
 from .docker_checks import inventory
 from .checks import read_systemd_snapshot
@@ -218,8 +219,9 @@ class TelegramBotPanel:
             message_id = ((sent or {}).get("result") or {}).get("message_id", message_id)
         return message_id
 
-    def answer_callback(self, callback_id: str) -> None:
-        self.api("answerCallbackQuery", {"callback_query_id": callback_id}, timeout=10)
+    def answer_callback(self, callback_id: str, text: str | None = None) -> None:
+        payload = {"callback_query_id": callback_id, **({"text": text} if text else {})}
+        self.api("answerCallbackQuery", payload, timeout=10)
 
     def edit(self, chat_id: str, message_id: int, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> None:
         """Edit a message in place; any overflow past Telegram's limit follows as new messages."""
@@ -254,6 +256,7 @@ class TelegramBotPanel:
                 "/services — system services\n"
                 "/incidents — active incidents\n"
                 "/usage — top 10 projects by memory use\n"
+                "/muted — muted bots (unmute)\n"
                 "/removed — items removed from monitoring (restore)\n"
                 "/frontendhealth — frontend health report\n"
                 "/botshealth — bot health report\n"
@@ -285,6 +288,7 @@ class TelegramBotPanel:
             {"command": "services", "description": "Show system services"},
             {"command": "incidents", "description": "Show active incidents"},
             {"command": "usage", "description": "Top 10 projects by memory use"},
+            {"command": "muted", "description": "Muted bots"},
             {"command": "removed", "description": "Restore removed items"},
             {"command": "frontendhealth", "description": "Show frontend health report"},
             {"command": "botshealth", "description": "Show bot health report"},
@@ -384,6 +388,9 @@ class TelegramBotPanel:
         running = sum(1 for container in found if container is not None and short_status(container)[1] == "RUNNING")
         mark = "✅" if running == len(containers) else "⚠️" if running else "🔴"
         page = Page("📊", project["name"], f"{mark} {running}/{len(containers)} containers running" if containers else None)
+        muted = self.mute_state(project_id)
+        if muted:
+            page.add(f"🔕 <i>Alerts muted until {muted['until'].astimezone(PKT).strftime('%H:%M')} PKT</i>")
         # One card per container, the same for every bot and frontend. Long projects start collapsed.
         for name, container in zip(containers, found):
             page.add(self.container_card(name, container, expandable=len(containers) > 2))
@@ -399,7 +406,9 @@ class TelegramBotPanel:
         buttons += [[{"text": f"⚙️ {service['name'][:30]}", "callback_data": f"service:{group_id}:{project_id}:{index}"}]
                     for index, service in enumerate(services)]
         # One Bot Info button per bot or frontend, right under its containers.
-        buttons.append([{"text": "ℹ️ Bot Info", "callback_data": f"botinfo:{group_id}:{project_id}"}])
+        info_label = "🌐 Frontend Info" if group_id == "frontend" else "ℹ️ Bot Info"
+        buttons.append([{"text": info_label, "callback_data": f"botinfo:{group_id}:{project_id}"},
+                        {"text": "🔔 Unmute" if muted else "🔕 Mute", "callback_data": f"mutemenu:{group_id}:{project_id}"}])
         buttons.append([{"text": "🗑 Remove from Monitoring", "callback_data": f"rm-confirm:{group_id}:{project_id}"}])
         buttons.append([{"text": "⬅️ Projects", "callback_data": f"group:{group_id}"}])
         return page.html(), buttons
@@ -424,6 +433,71 @@ class TelegramBotPanel:
                 ("Updated", local_date(info.get("created"), with_time=False))]),
         ], expandable)
 
+    def mute_state(self, project_id: str) -> dict | None:
+        try:
+            return active_mutes(self.database_path).get(project_id)
+        except (sqlite3.Error, OSError):
+            return None
+
+    def project_label(self, project_id: str) -> str:
+        if project_id == "host":
+            return "Server (host)"
+        return next((item.get("name", project_id) for group in self.projects.values() for item in group.get("items", [])
+                     if item.get("id") == project_id), project_id)
+
+    def mute_menu_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
+        project = self.project_by_id(group_id, project_id)
+        if not project:
+            return "<b>Project not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        muted = self.mute_state(project_id)
+        page = Page("🔕", project["name"], "Mute alerts")
+        if muted:
+            page.add(f"Muted until <b>{muted['until'].astimezone(PKT).strftime('%d %b, %H:%M')} PKT</b>.")
+        page.add("<i>While muted, problems are still tracked but no messages are sent. "
+                 "Anything still wrong when the mute ends is alerted then.</i>")
+        buttons = [[{"text": f"🔕 {label}", "callback_data": f"mute:{group_id}:{project_id}:{seconds}"} for seconds, label in MUTE_CHOICES]]
+        if muted:
+            buttons.append([{"text": "🔔 Unmute now", "callback_data": f"unmute:{group_id}:{project_id}"}])
+        buttons.append([{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}])
+        return page.html(), buttons
+
+    def muted_page(self) -> tuple[str, list[list[dict[str, str]]] | None]:
+        try:
+            mutes = active_mutes(self.database_path)
+        except (sqlite3.Error, OSError):
+            mutes = {}
+        page = Page("🔕", "Muted alerts")
+        if not mutes:
+            page.add("<i>Nothing is muted.</i>")
+        for project, info in sorted(mutes.items(), key=lambda entry: entry[1]["until"]):
+            page.add(card(f"🔕 {esc(info['label'])}", [("Until", info["until"].astimezone(PKT).strftime("%d %b, %H:%M PKT"))]))
+        buttons = [[{"text": f"🔔 Unmute {info['label'][:28]}", "callback_data": f"unmutep:{project}"[:64]}] for project, info in mutes.items()]
+        return page.html(), buttons or None
+
+    def alert_mute(self, chat_id: str, callback: dict[str, Any], data: str) -> None:
+        """🔕 / 🔔 buttons under an alert: change the mute, keep the alert text, swap the button."""
+        message_id = callback.get("message", {}).get("message_id")
+        try:
+            if data.startswith("mutep:"):
+                _, project_id, seconds = data.rsplit(":", 2)
+                label = self.project_label(project_id)
+                until = mute(self.database_path, project_id, int(seconds), label)
+                toast = f"🔕 {label} muted until {until.astimezone(PKT).strftime('%H:%M')} PKT"
+                button = {"text": "🔔 Unmute", "callback_data": f"unmutep:{project_id}"[:64]}
+            else:
+                project_id = data.split(":", 1)[1]
+                unmute(self.database_path, project_id)
+                toast = f"🔔 {self.project_label(project_id)} unmuted"
+                button = {"text": "🔕 Mute 1h", "callback_data": f"mutep:{project_id}:3600"[:64]}
+        except (sqlite3.Error, OSError, ValueError):
+            log.exception("Mute change failed: %s", data)
+            self.answer_callback(callback.get("id", ""), "Could not change the mute, try again")
+            return
+        self.answer_callback(callback.get("id", ""), toast)
+        if message_id:
+            self.api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id,
+                                                "reply_markup": {"inline_keyboard": [[button]]}})
+
     def bot_info_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
         """What is specific to this bot (exchanges, slots, RPC heights, ...) or frontend (health endpoint)."""
         project = self.project_by_id(group_id, project_id)
@@ -431,13 +505,30 @@ class TelegramBotPanel:
             return "<b>Project not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
         if group_id == "frontend":
             details = frontend_details(project, self.frontend_report_config, self.projects)
+            page = Page("🌐", project["name"], "Frontend Info")
+            page.add(details or "<i>No health endpoint is set up for this frontend yet.</i>")
         else:
             details = bot_details(project, self.bot_report_config)
-        page = Page("ℹ️", project["name"], "Bot Info")
-        page.add(details or "<i>No bot-specific check is set up for this one yet.</i>")
+            page = Page("ℹ️", project["name"], "Bot Info")
+            page.add(details or "<i>No bot-specific check is set up for this one yet.</i>")
         return page.footer().html(), [
             [{"text": "🔄 Refresh", "callback_data": f"botinfo:{group_id}:{project_id}"}],
             [{"text": "⬅️ Project", "callback_data": f"project:{group_id}:{project_id}"}]]
+
+    def service_info_page(self, group_id: str, project_id: str, index: int) -> tuple[str, list[list[dict[str, str]]]]:
+        """What is specific to this system service: its health check and, for Wallet Watchman, wallet activity."""
+        project = self.project_by_id(group_id, project_id)
+        services = project.get("services", []) if project else []
+        if not project or index < 0 or index >= len(services):
+            return "<b>Service not found</b>", [[{"text": "⬅️ Groups", "callback_data": "home"}]]
+        service = services[index]
+        details = service_details(service["unit"], self.bot_report_config.get("system_services") or {},
+                                  self.systemd_status(service["unit"]))
+        page = Page("ℹ️", service["name"], "Service Info")
+        page.add(details or "<i>No service-specific check is set up for this one yet.</i>")
+        return page.footer().html(), [
+            [{"text": "🔄 Refresh", "callback_data": f"svcinfo:{group_id}:{project_id}:{index}"}],
+            [{"text": "⬅️ Service", "callback_data": f"service:{group_id}:{project_id}:{index}"}]]
 
     def project_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
         project = self.project_by_id(group_id, project_id)
@@ -635,11 +726,6 @@ class TelegramBotPanel:
         page = Page("🟢" if status == "active" else "🔴", service["name"], "System service")
         page.add(card("⚙️ Service Status", [("Unit", service["unit"], "code"), ("Status", status.upper()),
                                            ("Sub-state", details.get("sub_state"))]))
-        if service["unit"] == "wallet-watchman.service":
-            activity = details.get("activity") or {}
-            page.add(card("👛 Wallet Activity", [("Wallets", activity.get("wallet_count") or "unknown"),
-                                                ("Last reload", activity.get("last_reload_at") or "unknown"),
-                                                ("RPC failures (10m)", activity.get("rpc_failures_10m") or 0)]))
         # Journal lines are shown exactly as journald wrote them, newest that fit.
         journal = [line.rstrip() for line in (details.get("recent_logs") or "").splitlines() if line.strip()]
         kept = newest_lines_that_fit(journal, MAX_MESSAGE - len(page.html()) - 120)
@@ -649,7 +735,8 @@ class TelegramBotPanel:
             note = f"\n<i>Latest {len(kept)} of {len(journal)} lines</i>" if len(kept) < len(journal) else ""
             page.add(f"📜 <b>Recent Journal</b>\n{code_box(kept)}{note}")
         text = page.footer().html()
-        return text, [[{"text": "🔄 Refresh", "callback_data": f"service:{group_id}:{project_id}:{index}"}],
+        return text, [[{"text": "🔄 Refresh", "callback_data": f"service:{group_id}:{project_id}:{index}"},
+                       {"text": "ℹ️ Service Info", "callback_data": f"svcinfo:{group_id}:{project_id}:{index}"}],
                       [{"text": "🗑 Remove from monitoring", "callback_data": f"rmsvc-confirm:{group_id}:{project_id}:{service['name']}"}],
                       [{"text": "⬅️ Services" if group_id == "bots_systemd" else "⬅️ Project",
                         "callback_data": f"group:{group_id}" if group_id == "bots_systemd" else f"project:{group_id}:{project_id}"}]]
@@ -687,6 +774,9 @@ class TelegramBotPanel:
                     self.edit(chat_id, waiting, self.usage_text())
                 else:
                     self.send(chat_id, self.usage_text())
+            elif command == "/muted":
+                text, keyboard = self.muted_page()
+                self.send(chat_id, text, keyboard)
             elif command == "/removed":
                 text, keyboard = self.removed_page()
                 self.send(chat_id, text, keyboard)
@@ -698,6 +788,10 @@ class TelegramBotPanel:
                 self.send(chat_id, self.command_help())
             return
         if not callback:
+            return
+        data = callback.get("data", "")
+        if data.startswith(("mutep:", "unmutep:")):
+            self.alert_mute(chat_id, callback, data)
             return
         self.answer_callback(callback.get("id", ""))
         data = callback.get("data", "")
@@ -716,6 +810,22 @@ class TelegramBotPanel:
         elif data.startswith("container:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.container_page(group_id, project_id, int(index))
+        elif data.startswith("svcinfo:"):
+            _, group_id, project_id, index = data.split(":", 3)
+            text, keyboard = self.service_info_page(group_id, project_id, int(index))
+        elif data.startswith("mutemenu:"):
+            _, group_id, project_id = data.split(":", 2)
+            text, keyboard = self.mute_menu_page(group_id, project_id)
+        elif data.startswith("mute:"):
+            _, group_id, project_id, seconds = data.split(":", 3)
+            project = self.project_by_id(group_id, project_id)
+            if project and seconds.isdigit():
+                mute(self.database_path, project_id, int(seconds), project.get("name", project_id))
+            text, keyboard = self.pretty_project_page(group_id, project_id)
+        elif data.startswith("unmute:"):
+            _, group_id, project_id = data.split(":", 2)
+            unmute(self.database_path, project_id)
+            text, keyboard = self.pretty_project_page(group_id, project_id)
         elif data.startswith("botinfo:"):
             _, group_id, project_id = data.split(":", 2)
             text, keyboard = self.bot_info_page(group_id, project_id)

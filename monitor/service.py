@@ -15,12 +15,14 @@ from pathlib import Path
 
 from .checks import endpoint_checks, host_checks, systemd_checks
 from .config import env, load_config
-from .docker_checks import checks as docker_checks, log_checks, snapshot as docker_snapshot
+from .docker_checks import checks as docker_checks, inventory, log_checks, snapshot as docker_snapshot
 from .incident_store import IncidentStore, fingerprint
+from .mutes import active_mutes
 from .notifier import TelegramNotifier
 from .removals import apply_removals, removed_keys
 from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message, should_send_daily_report, sol_usdt_results
 from .telegram_bot import TelegramBotPanel
+from .watchers import CrashNotices, DockerEvents, MemoryWatch
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ def issue_text(incident: dict) -> str:
         "PROJECT_DOWN": incident['message'],
         "CONTAINER_DOWN": "Docker reported that the container is down.",
         "SOL_SYNC_LAG": incident['message'],
+        "CONTAINER_HIGH_MEMORY": incident['message'],
         "SYSTEMD_DOWN": "systemd reported that the service is not active.",
         "HIGH_MEMORY": "Host memory usage exceeded the configured threshold.",
         "DISK_FULL": "Host disk usage exceeded the configured threshold.",
@@ -124,6 +127,52 @@ class OutageWindow:
                 held.add(project)
         protected = {item['service'] for item in findings if item['project'] in held}
         return [item for item in findings if not (item['project'] in held and item['type'] == 'CONTAINER_DOWN')], protected
+
+
+def mute_keyboard(project: str) -> list[list[dict[str, str]]] | None:
+    """'🔕 Mute 1h' under an alert, handled by the Telegram panel (same bot)."""
+    data = f"mutep:{project}:3600"
+    return [[{"text": "🔕 Mute 1h", "callback_data": data}]] if len(data.encode()) <= 64 else None
+
+
+def crash_message(crash: dict) -> str:
+    """A container died on its own and came back (restart policy) between two checks."""
+    reason = "Killed for running out of memory (OOM)" if crash["oom"] else f"Exited with code {crash['exit_code']}"
+    count = f"\n<b>Crashes:</b> {crash['count']} since the last notice" if crash["count"] > 1 else ""
+    return ("🔁 <b>CONTAINER CRASHED AND RESTARTED</b>\n\n"
+            f"<b>Project:</b> <code>{html.escape(str(crash['project']))}</code>\n"
+            f"<b>Service:</b> <code>{html.escape(crash['name'])}</code>\n\n"
+            f"<b>Reason:</b> {html.escape(reason)}{count}\n"
+            f"<b>Crashed At:</b> {local_time(crash['at'].isoformat())}\n\n"
+            "<i>It is running again, so no incident is open.</i>")
+
+
+def pending_crash_notices(crash_notices: CrashNotices, config: dict, findings: list[dict], store: IncidentStore) -> list[dict]:
+    """Crashes ready to announce: the container is running again and no down alert covers it."""
+    monitored = {item["name"]: item.get("project", item["name"]) for item in (config.get("docker", {}).get("containers") or [])}
+    down = {item["service"] for item in findings if item["type"] in ("CONTAINER_DOWN", "CONTAINER_UNHEALTHY")}
+    down_projects = {item["project"] for item in findings if item["type"] == "PROJECT_DOWN"}
+    down_projects |= {row[0] for row in store.db.execute("SELECT project FROM incidents WHERE status='OPEN' AND incident_type='PROJECT_DOWN'")}
+    down |= {name for name, project in monitored.items() if project in down_projects}
+    try:
+        running = {name for name, container in inventory().items() if container.status == "running"}
+    except Exception:
+        return []  # try again next poll
+    return crash_notices.ready(monitored, running, down)
+
+
+def without_muted(notifications: list[tuple], muted: dict, store: IncidentStore) -> list[tuple]:
+    """Drop messages for muted projects. Open alerts are not marked sent, so a problem still
+    open when the mute ends is alerted then; recoveries during a mute are dropped."""
+    kept = []
+    for key, message, project, keyboard in notifications:
+        if project in muted:
+            if key and key.startswith("recovery:"):
+                store.db.execute("DELETE FROM recovery_queue WHERE fingerprint=?", (key.split(":", 1)[1],))
+            continue
+        kept.append((key, message, project, keyboard))
+    store.db.commit()
+    return kept
 
 
 def discard_removed(store: IncidentStore, config: dict) -> None:
@@ -216,6 +265,13 @@ def main() -> None:
     summary_every = max(1, int(config.get("summary_interval_seconds", 300) / max(interval, 1)))
     outage_window = OutageWindow()
     sol_watch = SolSyncWatch()
+    memory_watch = MemoryWatch()
+    crash_notices = CrashNotices()
+    # Docker events wake the loop at once instead of waiting for the next poll.
+    wake = threading.Event()
+    events = DockerEvents(wake)
+    if config.get("docker", {}).get("enabled", True):
+        threading.Thread(target=events.run, name="docker-events", daemon=True).start()
     host_state: dict[str, int] = {}  # consecutive high-CPU polls, for cpu_sustain_checks
     report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True})
     bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True})
@@ -243,6 +299,7 @@ def main() -> None:
         findings += systemd_checks(config.get("systemd", {}), config.get("systemd_status_path", "/data/systemd-status.json"))
         findings += endpoint_checks(config.get("docker", {}).get("containers") or [])
         findings += sol_watch.findings(config)
+        findings += memory_watch.findings(config)
         findings = collapse_project_failures(findings, config)
         # A project outage resolves only when all its members are healthy.
         protected = set()
@@ -266,20 +323,33 @@ def main() -> None:
             cooldown = cooldowns.get("critical_seconds", 300) if finding["severity"] == "CRITICAL" else cooldowns.get("default_seconds", 900)
             incident, should_alert = store.observe(key, finding["project"], finding["service"], finding["type"], finding["severity"], finding["message"], int(cooldown))
             if should_alert:
-                notifications.append((key, message_for("🚨 INCIDENT OPEN / STILL ACTIVE", incident)))
+                notifications.append((key, message_for("🚨 INCIDENT OPEN / STILL ACTIVE", incident),
+                                      finding["project"], mute_keyboard(finding["project"])))
                 log.warning('incident active: project=%s service=%s type=%s', finding['project'], finding['service'], finding['type'])
         project_down = {item['project'] for item in findings if item['type'] == 'PROJECT_DOWN'}
         for incident in store.recover_stale(set(active), protected):
             # Grouped container findings are superseded, not recovered.
             if incident['project'] in project_down:
                 continue
+            # Never alerted (e.g. muted the whole time): nothing to announce.
+            if incident.get('last_alert_at') is None:
+                continue
             store.db.execute('INSERT OR REPLACE INTO recovery_queue VALUES (?, ?)', (incident['fingerprint'], json.dumps(incident)))
             log.info('incident recovered: project=%s service=%s', incident['project'], incident['service'])
         store.db.commit()
-        for row in store.db.execute('SELECT fingerprint, payload FROM recovery_queue'):
-            notifications.append(('recovery:' + row[0], message_for('✅ INCIDENT RECOVERED', json.loads(row[1]))))
+        for row in store.db.execute('SELECT fingerprint, payload FROM recovery_queue').fetchall():
+            payload = json.loads(row[1])
+            notifications.append(('recovery:' + row[0], message_for('✅ INCIDENT RECOVERED', payload), payload['project'], None))
+        crash_notices.add(events.take_crashes())
+        if crash_notices.waiting:
+            notifications += [(None, crash_message(crash), crash['project'], mute_keyboard(crash['project']))
+                              for crash in pending_crash_notices(crash_notices, config, findings, store)]
+        try:
+            notifications = without_muted(notifications, active_mutes(database_path), store)
+        except sqlite3.Error:
+            log.exception('mute list unavailable; sending all notifications')
         with ThreadPoolExecutor(max_workers=4) as delivery_pool:
-            jobs = [(key, delivery_pool.submit(notifier.send, message)) for key, message in notifications]
+            jobs = [(key, delivery_pool.submit(notifier.send, message, keyboard)) for key, message, _project, keyboard in notifications]
             for key, job in jobs:
                 if job.result() and key:
                     if key.startswith('recovery:'):
@@ -315,5 +385,10 @@ def main() -> None:
             active_count = store.db.execute("SELECT COUNT(*) FROM incidents WHERE status='OPEN'").fetchone()[0]
             log.info("monitoring summary: running=%s healthy=%s unhealthy=%s stopped=%s missing=%s active_incidents=%s findings_this_poll=%s",
                      summary["running"], summary["healthy"], summary["unhealthy"], summary["stopped"], summary["missing"], active_count, len(findings))
-        time.sleep(max(0, interval - (time.monotonic() - cycle_started)))
+        elapsed = time.monotonic() - cycle_started
+        if elapsed < 1:
+            time.sleep(1 - elapsed)  # at most one poll per second, even during an event burst
+        wake.wait(max(0, interval - (time.monotonic() - cycle_started)))
+        wake.clear()
+    events.stop()
     panel.stop()

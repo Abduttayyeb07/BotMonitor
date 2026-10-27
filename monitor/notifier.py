@@ -12,7 +12,9 @@ class TelegramNotifier:
     def __init__(self, token: str | None, chat_ids: list[str], enabled: bool = True):
         self.token, self.chat_ids, self.enabled = token, chat_ids, enabled
 
-    def send(self, text: str) -> bool:
+    def send(self, text: str, keyboard: list[list[dict[str, str]]] | None = None) -> bool:
+        """Send to every chat; `keyboard` adds inline buttons (e.g. 🔕 Mute 1h) under the message."""
+        markup = {"reply_markup": {"inline_keyboard": keyboard}} if keyboard else {}
         if not self.enabled:
             log.info("Telegram disabled: %s", text.replace("\n", " | "))
             return True
@@ -24,14 +26,14 @@ class TelegramNotifier:
             try:
                 response = requests.post(
                     f"https://api.telegram.org/bot{self.token}/sendMessage",
-                    json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=10)
+                    json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True, **markup}, timeout=10)
                 if response.ok:
                     continue
                 if response.status_code == 400:
                     plain = html_lib.unescape(re.sub(r"<[^>]+>", "", text))
                     fallback = requests.post(
                         f"https://api.telegram.org/bot{self.token}/sendMessage",
-                        json={"chat_id": chat_id, "text": plain, "disable_web_page_preview": True}, timeout=10)
+                        json={"chat_id": chat_id, "text": plain, "disable_web_page_preview": True, **markup}, timeout=10)
                     if fallback.ok:
                         log.warning("Telegram HTML rejected for chat %s; delivered plain-text fallback", chat_id)
                         continue

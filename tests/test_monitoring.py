@@ -489,7 +489,7 @@ class MonitoringRegressionTests(unittest.TestCase):
         callbacks = [row[0]['callback_data'] for row in keyboard]
         self.assertEqual(callbacks, ['container:frontend:lp:0', 'container:frontend:lp:1', 'container:frontend:lp:2',
                                      'botinfo:frontend:lp', 'rm-confirm:frontend:lp', 'group:frontend'])
-        self.assertEqual(keyboard[3][0]['text'], 'ℹ️ Bot Info')
+        self.assertEqual(keyboard[3][0]['text'], '🌐 Frontend Info', 'frontends get Frontend Info, not Bot Info')
 
     def test_one_or_two_containers_are_shown_open(self):
         web = self.fake_container(['NODE_VERSION=24.22.1'], name='zig-whale-bot')
@@ -512,12 +512,35 @@ class MonitoringRegressionTests(unittest.TestCase):
         self.assertTrue(bot_text.startswith('ℹ️ <b>Zig Whale Bot</b>\n<i>Bot Info</i>'))
         self.assertIn('🩺 Bot Health', bot_text)
         self.assertIn('🌐 Frontend Health', front_text)
+        self.assertTrue(front_text.startswith('🌐 <b>Arkive</b>\n<i>Frontend Info</i>'))
         bot.assert_called_once()
         front.assert_called_once()
         self.assertEqual([row[0]['callback_data'] for row in bot_keyboard], ['botinfo:bots_docker:marketzig', 'project:bots_docker:marketzig'])
         with patch('monitor.telegram_bot.bot_details', return_value=None):
             empty, _ = panel.bot_info_page('bots_docker', 'marketzig')
         self.assertIn('No bot-specific check is set up for this one yet.', empty)
+
+    def test_service_info_page_shows_the_services_own_health_and_activity(self):
+        projects = {'bots_systemd': {'items': [{'id': 'system-services', 'name': 'System Services', 'services': [
+            {'name': 'wallet-watchman', 'unit': 'wallet-watchman.service'}]}]}}
+        panel = TelegramBotPanel('token', ['1'], projects, bot_report_config={'system_services': {}})
+        snapshot = {'services': {
+            'wallet-watchman.service': {'active_state': 'active', 'sub_state': 'running',
+                                        'activity': {'wallet_count': 5329, 'last_reload_at': '2026-10-27T10:00:00Z', 'rpc_failures_10m': 0}},
+            'zigchain-exporter.service': {'active_state': 'active', 'sub_state': 'running'}}}
+        status = snapshot['services']['wallet-watchman.service']
+        with patch('monitor.reports.read_systemd_snapshot', return_value=snapshot), \
+             patch.object(panel, 'systemd_status', return_value={**status, 'recent_logs': 'Oct 27 10:00:00 host watchman[1]: ok'}):
+            info, info_buttons = panel.service_info_page('bots_systemd', 'system-services', 0)
+            page, page_buttons = panel.service_page('bots_systemd', 'system-services', 0)
+        self.assertTrue(info.startswith('ℹ️ <b>wallet-watchman</b>\n<i>Service Info</i>'))
+        self.assertIn('<b>🩺 Service Health</b>\n├ Status: 🟢 Healthy\n└ Summary: running; 5329 wallets', info)
+        self.assertIn('<b>👛 Wallet Activity</b>\n├ Wallets: 5329', info)
+        self.assertNotIn('Wallet Activity', page, 'the specifics live behind the Service Info button')
+        self.assertIn({'text': 'ℹ️ Service Info', 'callback_data': 'svcinfo:bots_systemd:system-services:0'},
+                      [button for row in page_buttons for button in row])
+        self.assertEqual([row[0]['callback_data'] for row in info_buttons],
+                         ['svcinfo:bots_systemd:system-services:0', 'service:bots_systemd:system-services:0'])
 
     def test_each_bots_details_are_its_own(self):
         from monitor import bot_details as details
@@ -673,6 +696,194 @@ class MonitoringRegressionTests(unittest.TestCase):
              patch('monitor.checks.psutil.cpu_percent', return_value=95.0):
             self.assertEqual([item['type'] for item in host_checks({'cpu_warning_percent': 90})], ['HIGH_CPU'],
                              'without state (old callers) a single sample still alerts')
+
+    # --- Memory alerts, Docker events, mutes ------------------------------------------
+
+    def memory_config(self, **overrides):
+        item = {'name': 'arkive', 'project': 'arkive', **overrides}
+        return {'docker': {'containers': [item, {'name': 'small', 'project': 'small'}]},
+                'thresholds': {'container_memory_warning_mb': 1536, 'container_memory_critical_mb': 3072,
+                               'container_memory_sustain_checks': 3, 'container_memory_interval_seconds': 0}}
+
+    def test_memory_alert_needs_three_high_readings_and_uses_overrides(self):
+        from monitor.watchers import MemoryWatch
+        GB = 1024 ** 3
+        readings = {'arkive': 2 * GB, 'small': 100 * 1024 ** 2}
+        containers = {name: SimpleNamespace(name=name, status='running') for name in readings}
+        watch = MemoryWatch(read_inventory=lambda: containers, read_memory=lambda c: readings[c.name])
+        config = self.memory_config()
+        self.assertEqual(watch.findings(config), [])
+        self.assertEqual(watch.findings(config), [])
+        found = watch.findings(config)
+        self.assertEqual([(f['service'], f['type'], f['severity']) for f in found], [('arkive', 'CONTAINER_HIGH_MEMORY', 'WARNING')])
+        self.assertEqual(found[0]['message'], 'Container memory is 2.0 GB (warning limit 1.5 GB)')
+        readings['arkive'] = int(3.5 * GB)
+        self.assertEqual(watch.findings(config)[0]['severity'], 'CRITICAL')
+        # A per-container override raises Arkive's limit: no alert at 3.5 GB.
+        override = MemoryWatch(read_inventory=lambda: containers, read_memory=lambda c: readings[c.name])
+        big = self.memory_config(memory_warning_mb=4096, memory_critical_mb=6144)
+        for _ in range(4):
+            self.assertEqual(override.findings(big), [])
+        # One normal reading resets the count and the alert clears.
+        readings['arkive'] = 1 * GB
+        self.assertEqual(watch.findings(config), [])
+
+    def test_memory_alert_survives_a_failed_read_and_resets_when_stopped(self):
+        from monitor.watchers import MemoryWatch
+        GB = 1024 ** 3
+        state = {'value': 2 * GB}
+        containers = {'arkive': SimpleNamespace(name='arkive', status='running')}
+        watch = MemoryWatch(read_inventory=lambda: containers, read_memory=lambda c: state['value'])
+        config = self.memory_config()
+        for _ in range(3):
+            found = watch.findings(config)
+        self.assertEqual(len(found), 1)
+        state['value'] = None
+        self.assertEqual(watch.findings(config), found, 'an unknown reading keeps the incident open')
+        broken = MemoryWatch(read_inventory=Mock(side_effect=RuntimeError('docker down')))
+        broken.current = {'arkive': found[0]}
+        self.assertEqual(broken.findings(config), found, 'Docker unavailable keeps the incident open')
+        containers['arkive'].status = 'exited'
+        self.assertEqual(watch.findings(config), [], 'a stopped container is reported by the container check')
+        self.assertEqual(watch.over, {})
+
+    def test_memory_check_runs_once_per_interval(self):
+        from monitor.watchers import MemoryWatch
+        read = Mock(return_value=1024)
+        watch = MemoryWatch(read_inventory=lambda: {'arkive': SimpleNamespace(name='arkive', status='running')}, read_memory=read)
+        config = self.memory_config()
+        config['thresholds']['container_memory_interval_seconds'] = 60
+        watch.findings(config)
+        watch.findings(config)
+        self.assertEqual(read.call_count, 1)
+
+    def test_high_memory_incident_keeps_one_fingerprint_as_numbers_change(self):
+        self.assertEqual(fingerprint('arkive', 'arkive', 'CONTAINER_HIGH_MEMORY', 'Container memory is 2.0 GB (warning limit 1.5 GB)'),
+                         fingerprint('arkive', 'arkive', 'CONTAINER_HIGH_MEMORY', 'Container memory is 3.4 GB (critical limit 3.0 GB)'))
+
+    def test_docker_events_record_real_crashes_only_and_wake_the_loop(self):
+        import threading
+        from monitor.watchers import DockerEvents
+        wake = threading.Event()
+        events = DockerEvents(wake)
+        def event(action, name, **attributes):
+            return {'Action': action, 'time': 1761560000, 'Actor': {'Attributes': {'name': name, **attributes}}}
+        events.handle(event('die', 'bot', exitCode='1'), now=100)
+        self.assertTrue(wake.is_set())
+        wake.clear()
+        # A requested stop (docker stop / compose down) is not a crash.
+        events.handle(event('kill', 'web', signal='15'), now=100)
+        events.handle(event('die', 'web', exitCode='143'), now=101)
+        # A clean exit is not a crash either.
+        events.handle(event('die', 'job', exitCode='0'), now=101)
+        # Out of memory: the oom event, then the die that follows.
+        events.handle(event('oom', 'db'), now=102)
+        events.handle(event('die', 'db', exitCode='137'), now=102)
+        wake.clear()
+        events.handle(event('health_status: healthy', 'bot'), now=103)
+        self.assertFalse(wake.is_set(), 'routine healthy checks do not wake the loop')
+        crashes = {crash['name']: crash for crash in events.take_crashes()}
+        self.assertEqual(sorted(crashes), ['bot', 'db'])
+        self.assertEqual((crashes['bot']['exit_code'], crashes['bot']['oom']), (1, False))
+        self.assertEqual((crashes['db']['exit_code'], crashes['db']['oom']), (137, True))
+        self.assertEqual(events.take_crashes(), [], 'taken once')
+
+    def test_crash_notice_waits_for_restart_and_skips_containers_that_stay_down(self):
+        from monitor.watchers import CrashNotices
+        from datetime import datetime, timezone
+        notices = CrashNotices(cooldown=600)
+        crash = lambda name: {'name': name, 'exit_code': 1, 'oom': False, 'count': 1, 'at': datetime(2026, 10, 27, tzinfo=timezone.utc)}
+        notices.add([crash('bot'), crash('dead'), crash('stranger')])
+        monitored = {'bot': 'marketzig', 'dead': 'deadproj'}
+        self.assertEqual(notices.ready(monitored, running=set(), down=set(), now=0), [], 'still restarting')
+        self.assertIn('bot', notices.waiting)
+        self.assertNotIn('stranger', notices.waiting, 'not a monitored container')
+        ready = notices.ready(monitored, running={'bot'}, down={'dead'}, now=1)
+        self.assertEqual([(item['name'], item['project']) for item in ready], [('bot', 'marketzig')])
+        self.assertEqual(notices.waiting, {}, 'the down alert covers "dead"')
+        notices.add([crash('bot'), crash('bot')])
+        self.assertEqual(notices.ready(monitored, running={'bot'}, down=set(), now=60), [], 'cooldown')
+        notices.add([crash('bot')])
+        later = notices.ready(monitored, running={'bot'}, down=set(), now=700)
+        self.assertEqual(later[0]['count'], 3, 'crashes during the cooldown are counted, not lost')
+
+    def test_crash_message(self):
+        from monitor.service import crash_message
+        from datetime import datetime, timezone
+        text = crash_message({'name': 'zig<bot>', 'project': 'marketzig', 'exit_code': None, 'oom': True, 'count': 2,
+                              'at': datetime(2026, 10, 27, 10, 18, 13, tzinfo=timezone.utc)})
+        self.assertIn('🔁 <b>CONTAINER CRASHED AND RESTARTED</b>', text)
+        self.assertIn('<code>zig&lt;bot&gt;</code>', text)
+        self.assertIn('Killed for running out of memory (OOM)', text)
+        self.assertIn('<b>Crashes:</b> 2 since the last notice', text)
+        self.assertIn('27 Oct 2026, 15:18:13 PKT', text)
+
+    def test_mutes_persist_and_expire(self):
+        from monitor.mutes import active_mutes, mute, unmute
+        from datetime import datetime, timedelta, timezone
+        now = datetime(2026, 10, 27, 10, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            until = mute(path, 'host', 3600, 'Server (host)', now=now)
+            self.assertEqual(until, now + timedelta(hours=1))
+            self.assertIn('host', active_mutes(path, now=now + timedelta(minutes=59)))
+            self.assertNotIn('host', active_mutes(path, now=now + timedelta(minutes=61)), 'expired')
+            mute(path, 'marketzig', 3600, 'Zig Whale Bot', now=now)
+            unmute(path, 'marketzig')
+            self.assertEqual(active_mutes(path, now=now), {'host': {'until': until, 'label': 'Server (host)'}})
+
+    def test_muted_projects_get_no_messages_and_their_recoveries_are_dropped(self):
+        from monitor.service import without_muted
+        with tempfile.TemporaryDirectory() as directory:
+            store = IncidentStore(str(Path(directory) / 'incidents.db'))
+            store.db.execute("INSERT INTO recovery_queue VALUES ('abc', '{}')")
+            store.db.commit()
+            notifications = [('k1', 'open host', 'host', None), ('recovery:abc', 'recovered host', 'host', None),
+                             ('k2', 'open bot', 'marketzig', None), (None, 'crash bot', 'marketzig', None)]
+            kept = without_muted(notifications, {'host': {}}, store)
+            self.assertEqual([item[1] for item in kept], ['open bot', 'crash bot'])
+            self.assertEqual(store.db.execute('SELECT COUNT(*) FROM recovery_queue').fetchone()[0], 0)
+            store.db.close()
+
+    def test_alerts_carry_a_mute_button(self):
+        from monitor.notifier import TelegramNotifier
+        from monitor.service import mute_keyboard
+        self.assertEqual(mute_keyboard('host'), [[{'text': '🔕 Mute 1h', 'callback_data': 'mutep:host:3600'}]])
+        self.assertIsNone(mute_keyboard('x' * 80), 'over the 64-byte callback limit: no button')
+        sent = []
+        with patch('monitor.notifier.requests.post', side_effect=lambda url, json, timeout: sent.append(json) or SimpleNamespace(ok=True)):
+            self.assertTrue(TelegramNotifier('t', ['1']).send('hi', mute_keyboard('host')))
+        self.assertEqual(sent[0]['reply_markup'], {'inline_keyboard': [[{'text': '🔕 Mute 1h', 'callback_data': 'mutep:host:3600'}]]})
+
+    def test_mute_from_an_alert_and_from_the_bot_page(self):
+        from monitor.mutes import active_mutes
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            projects = {'bots_docker': {'items': [{'id': 'marketzig', 'name': 'Zig Whale Bot', 'containers': []}]}}
+            panel = TelegramBotPanel('token', ['1'], projects, database_path=path)
+            calls = []
+            with patch.object(panel, 'api', side_effect=lambda method, payload, **_: calls.append((method, payload)) or {'result': {}}):
+                panel.handle({'callback_query': {'id': 'q1', 'data': 'mutep:host:3600', 'message': {'message_id': 7, 'chat': {'id': 1}}}})
+            self.assertIn('host', active_mutes(path))
+            toast = next(payload for method, payload in calls if method == 'answerCallbackQuery')
+            self.assertTrue(toast['text'].startswith('🔕 Server (host) muted until'))
+            markup = next(payload for method, payload in calls if method == 'editMessageReplyMarkup')
+            self.assertEqual(markup['reply_markup']['inline_keyboard'][0][0]['callback_data'], 'unmutep:host')
+            self.assertFalse(any(method == 'editMessageText' for method, _ in calls), 'the alert text is kept')
+            # From the bot page: mute for 4h, then the page shows it and offers Unmute.
+            with patch.object(panel, 'incident_history', return_value=(0, 0, 0)):
+                text, keyboard = panel.mute_menu_page('bots_docker', 'marketzig')
+                self.assertEqual([button['callback_data'] for button in keyboard[0]],
+                                 ['mute:bots_docker:marketzig:3600', 'mute:bots_docker:marketzig:14400', 'mute:bots_docker:marketzig:86400'])
+                with patch.object(panel, 'api', return_value={'result': {}}):
+                    panel.handle({'callback_query': {'id': 'q2', 'data': 'mute:bots_docker:marketzig:14400', 'message': {'message_id': 8, 'chat': {'id': 1}}}})
+                page, buttons = panel.pretty_project_page('bots_docker', 'marketzig')
+            self.assertIn('🔕 <i>Alerts muted until', page)
+            self.assertIn({'text': '🔔 Unmute', 'callback_data': 'mutemenu:bots_docker:marketzig'}, [b for row in buttons for b in row])
+            muted_text, muted_buttons = panel.muted_page()
+            self.assertIn('Server (host)', muted_text)
+            self.assertIn('Zig Whale Bot', muted_text)
+            self.assertEqual(len(muted_buttons), 2)
 
     def test_small_disk_parts_show_in_kb_and_empty_ones_are_hidden(self):
         from monitor.telegram_bot import disk_split
