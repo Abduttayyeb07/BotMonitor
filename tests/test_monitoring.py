@@ -590,6 +590,21 @@ class MonitoringRegressionTests(unittest.TestCase):
                                '├ HTTP status: 200\n└ Response time: 34 ms</blockquote>')
         self.assertIsNone(frontend_details({'id': 'not-a-frontend'}, {'items': [{'id': 'arkive', 'health_url': 'http://x'}]}, {}))
 
+    def test_frontend_info_matches_ids_and_names_loosely_or_uses_the_projects_own_health_url(self):
+        from monitor.bot_details import frontend_item
+        report = {'items': [{'id': 'liquidity-provider', 'name': 'Liquidity Provider', 'health_url': 'http://127.0.0.1:5173/health'}]}
+        # The server's menu id differs from the report id: still found, by id or by name.
+        self.assertEqual(frontend_item({'id': 'liquidityprovider', 'name': 'LP'}, report, {})['health_url'], 'http://127.0.0.1:5173/health')
+        self.assertEqual(frontend_item({'id': 'lp', 'name': 'Liquidity  provider'}, report, {})['health_url'], 'http://127.0.0.1:5173/health')
+        self.assertIsNone(frontend_item({'id': 'other', 'name': 'Other'}, report, {}))
+        own = frontend_item({'id': 'other', 'name': 'Other', 'health_url': 'http://127.0.0.1:9000/health'}, report, {})
+        self.assertEqual(own['health_url'], 'http://127.0.0.1:9000/health', 'a health_url on the project wins')
+        panel = TelegramBotPanel('token', ['1'], {'frontend': {'items': [{'id': 'other', 'name': 'Other', 'containers': []}]}},
+                                 frontend_report_config=report)
+        text, _ = panel.bot_info_page('frontend', 'other')
+        self.assertIn('No health URL found for this frontend.', text)
+        self.assertIn('<code>other</code>', text, 'says which project id to add it to')
+
     def test_details_page_has_cards_and_logs_in_the_code_box(self):
         container = self.fake_container(['NODE_VERSION=24.22.1'], {'/app/package.json': '{"dependencies": {"a": "1", "b": "1"}, "devDependencies": {"c": "1", "d": "1", "e": "1"}}'})
         container.logs = Mock(return_value='\n'.join([self.WHALE_LOG] * 12).encode())

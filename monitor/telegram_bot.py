@@ -587,7 +587,10 @@ class TelegramBotPanel:
         if group_id == "frontend":
             details = frontend_details(project, self.frontend_report_config, self.projects)
             page = Page("🌐", project["name"], "Frontend Info")
-            page.add(details or "<i>No health endpoint is set up for this frontend yet.</i>")
+            page.add(details or (
+                "<i>No health URL found for this frontend.</i>\n"
+                f"Add <code>health_url: http://127.0.0.1:PORT/health</code> to the project <code>{esc(project_id)}</code> "
+                "under <code>projects → frontend → items</code> in config.yaml, then rebuild the monitor."))
         else:
             details = bot_details(project, self.bot_report_config)
             page = Page("ℹ️", project["name"], "Bot Info")

@@ -7,6 +7,7 @@ changed, and a check that fails shows as "unavailable" instead of breaking the p
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 from .reports import (DEFAULT_BEP20_CONTAINER, DEFAULT_ETH_USDT_CONTAINER, frontend_endpoint_results,
@@ -190,8 +191,23 @@ def service_details(unit: str, config: dict[str, Any], status: dict[str, Any]) -
     return "\n\n".join(block for block in blocks if block) or None
 
 
+def _same_name(value: Any) -> str:
+    """'Liquidity Provider', 'liquidity-provider' and 'liquidityprovider' all compare equal."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def frontend_item(project: dict[str, Any], frontend_config: dict[str, Any], projects: dict[str, Any]) -> dict[str, Any] | None:
+    """The health endpoint for a frontend: a health_url on the project itself, else the
+    daily-report entry whose id or name matches the project's (ignoring case, dashes, spaces)."""
+    if project.get("health_url"):
+        return {"id": project.get("id"), "name": project.get("name"), "health_url": project["health_url"]}
+    wanted = {_same_name(project.get(key)) for key in ("id", "name", "menu_name")} - {""}
+    return next((entry for entry in frontend_report_items(frontend_config, projects)
+                 if {_same_name(entry.get("id")), _same_name(entry.get("name"))} & wanted), None)
+
+
 def frontend_details(project: dict[str, Any], frontend_config: dict[str, Any], projects: dict[str, Any]) -> str | None:
-    item = next((entry for entry in frontend_report_items(frontend_config, projects) if entry.get("id") == project.get("id")), None)
+    item = frontend_item(project, frontend_config, projects)
     if item is None:
         return None
     try:
