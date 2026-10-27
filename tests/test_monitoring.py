@@ -567,6 +567,9 @@ class MonitoringRegressionTests(unittest.TestCase):
     def test_bot_check_is_found_by_project_id_or_by_container_and_skipped_when_removed(self):
         from monitor.bot_details import check_key
         self.assertEqual(check_key({'id': 'marketzig', 'containers': ['zig-whale-bot']}, {}), 'zig_whale')
+        # The server's config.yaml calls the Zig USD Alerts project 'zig-only-alerts'.
+        self.assertEqual(check_key({'id': 'zig-only-alerts', 'containers': []}, {}), 'zig_usd_alerts')
+        self.assertEqual(check_key({'id': 'zig-usd-only-alerts', 'containers': []}, {}), 'zig_usd_alerts')
         renamed = {'id': 'zig-alert-bot', 'containers': ['zig-usd-only-alerts-zig-only-alerts-1']}
         self.assertEqual(check_key(renamed, {'zig_usd_alerts': {'container': 'zig-usd-only-alerts-zig-only-alerts-1'}}), 'zig_usd_alerts')
         self.assertIsNone(check_key({'id': 'marketzig', 'containers': []}, {'zig_whale': {'enabled': False}}))

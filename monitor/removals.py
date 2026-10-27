@@ -15,6 +15,7 @@ from typing import Any
 BOT_REPORT_KEYS = {
     "marketzig": "zig_whale",
     "zig-usd-only-alerts": "zig_usd_alerts",
+    "zig-only-alerts": "zig_usd_alerts",  # the server's config.yaml id
     "wallet-monitor": "wallet_monitor",
     "patronicluster": "zigchain_bot",
     "stakeunstake": "stake_unstake",

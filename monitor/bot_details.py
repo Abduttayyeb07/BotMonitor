@@ -129,6 +129,7 @@ PROJECT_CHECKS = {
     "marketzig": "zig_whale", "sol-usdt": "sol_usdt", "nawavaldora": "nawa_valdora",
     "nawa-finance-redeemer": "nawa_finance_redeemer", "tokenx-vault": "tokenx_vault", "bep20": "bep20_usdt",
     "ethtethertoken": "eth_usdt", "sheetszahoor": "sheets_sync", "zig-usd-only-alerts": "zig_usd_alerts",
+    "zig-only-alerts": "zig_usd_alerts",  # the project id used in the server's config.yaml
     "patronicluster": "zigchain_bot", "stakeunstake": "stake_unstake", "wallet-monitor": "wallet_monitor",
     "launches": "mdf_tracker", "highlaunches": "highbuy_monitor",
 }
