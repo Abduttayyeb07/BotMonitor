@@ -117,6 +117,21 @@ come from `docker system df` and are cached for 10 minutes.
   messages for 1h / 4h / 24h. Incidents are still tracked; one still open when the mute ends is
   alerted then. `/muted` lists active mutes.
 
+## Adding new containers from Telegram
+
+When a container starts that the monitor does not know, Telegram gets one
+"New container detected" message with **Add as Bot**, **Add as Frontend** and
+**Ignore** buttons. Containers from the same Docker Compose project are handled
+as one bot. Each project is asked about **once**: restarts, rebuilds and
+`compose up` never ask again, whatever the answer was. Added projects are stored
+in SQLite (like removals): they get a menu button, container, memory and crash
+checks, mutes and `/usage`, with no `config.yaml` edit or restart. New services
+that join an added Compose project are included automatically.
+
+Containers already running when the monitor starts are not announced; `/scan`
+lists every unmonitored one with Add and Ignore buttons, plus the ignored list.
+Bot-specific "Bot Info" checks (exchanges, slots, RPC heights) still need code.
+
 ## Outage detection
 
 Configured containers that are removed (including `docker compose down`) count

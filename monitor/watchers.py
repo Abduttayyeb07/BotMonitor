@@ -121,6 +121,7 @@ class DockerEvents:
         self.lock = threading.Lock()
         self.requested_stop: dict[str, float] = {}
         self.pending: dict[str, dict[str, Any]] = {}
+        self.started: set[str] = set()  # containers that started since the last look (for discovery)
         self.stream = None
 
     def run(self) -> None:
@@ -161,6 +162,8 @@ class DockerEvents:
         if not name:
             return
         with self.lock:
+            if action == "start":
+                self.started.add(name)
             if action in ("kill", "stop"):
                 self.requested_stop[name] = now
             elif action == "oom":
@@ -184,6 +187,11 @@ class DockerEvents:
         if exit_code is not None:
             entry["exit_code"] = exit_code
         entry["at"] = when
+
+    def take_started(self) -> set[str]:
+        with self.lock:
+            started, self.started = self.started, set()
+        return started
 
     def take_crashes(self) -> list[dict[str, Any]]:
         with self.lock:

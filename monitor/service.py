@@ -19,7 +19,7 @@ from .docker_checks import checks as docker_checks, inventory, log_checks, snaps
 from .incident_store import IncidentStore, fingerprint
 from .mutes import active_mutes
 from .notifier import TelegramNotifier
-from .removals import apply_removals, removed_keys
+from .additions import config_version, effective_config, sync_discovered
 from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message, should_send_daily_report, sol_usdt_results
 from .telegram_bot import TelegramBotPanel
 from .watchers import CrashNotices, DockerEvents, MemoryWatch
@@ -161,6 +161,33 @@ def pending_crash_notices(crash_notices: CrashNotices, config: dict, findings: l
     return crash_notices.ready(monitored, running, down)
 
 
+def discover(database_path: str, base_config: dict, announce: bool) -> list[dict]:
+    """Unknown running containers seen for the first time (each group is only ever returned once)."""
+    try:
+        return sync_discovered(database_path, base_config, inventory(), announce)
+    except Exception:
+        log.exception("container discovery failed")
+        return []
+
+
+def new_container_alert(info: dict) -> tuple[str, list[list[dict[str, str]]]]:
+    """The one-time question about a container group nobody configured yet."""
+    details = info["details"]
+    lines = ["🆕 <b>NEW CONTAINER DETECTED</b>", "",
+             f"<b>Project:</b> <code>{html.escape(info['name'])}</code>",
+             f"<b>Containers:</b> <code>{html.escape(', '.join(sorted(info['containers'])))}</code>"]
+    if details.get("images"):
+        lines.append(f"<b>Image:</b> <code>{html.escape(', '.join(details['images']))}</code>")
+    if details.get("working_dir"):
+        lines.append(f"<b>Folder:</b> <code>{html.escape(details['working_dir'])}</code>")
+    lines += ["", "Add it to monitoring? <i>You will only be asked once; it stays under /scan.</i>"]
+    row_id = info["id"]
+    return "\n".join(lines), [
+        [{"text": "➕ Add as Bot", "callback_data": f"disc:add:{row_id}:bots_docker"},
+         {"text": "🌐 Add as Frontend", "callback_data": f"disc:add:{row_id}:frontend"}],
+        [{"text": "🙈 Ignore", "callback_data": f"disc:ign:{row_id}"}]]
+
+
 def without_muted(notifications: list[tuple], muted: dict, store: IncidentStore) -> list[tuple]:
     """Drop messages for muted projects. Open alerts are not marked sent, so a problem still
     open when the mute ends is alerted then; recoveries during a mute are dropped."""
@@ -225,9 +252,8 @@ def main() -> None:
     base_config = load_config(os.getenv("MONITOR_CONFIG", "config.yaml"))
     database_path = base_config.get("database_path", "data/incidents.db")
     store = IncidentStore(database_path)
-    # Items removed from the Telegram menu stay out of every check and report.
-    applied_removals = removed_keys(database_path)
-    config = apply_removals(base_config, applied_removals)
+    # config.yaml + containers added from Telegram - items removed from Telegram.
+    config, applied_version = effective_config(base_config, database_path)
     discard_removed(store, config)
     telegram_config = config.get("telegram", {})
     chat_ids_value = env(telegram_config.get("chat_ids_env", "TELEGRAM_CHAT_IDS"))
@@ -272,6 +298,8 @@ def main() -> None:
     events = DockerEvents(wake)
     if config.get("docker", {}).get("enabled", True):
         threading.Thread(target=events.run, name="docker-events", daemon=True).start()
+        # Containers already running at startup are recorded silently (see /scan), not announced.
+        discover(database_path, base_config, announce=False)
     host_state: dict[str, int] = {}  # consecutive high-CPU polls, for cpu_sustain_checks
     report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True})
     bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True})
@@ -280,18 +308,21 @@ def main() -> None:
         cycle_started = time.monotonic()
         poll_number += 1
         try:
-            current_removals = removed_keys(database_path)
+            version = config_version(database_path)
         except sqlite3.Error:
-            current_removals = applied_removals
-        if current_removals != applied_removals:
-            applied_removals = current_removals
-            config = apply_removals(base_config, applied_removals)
+            version = applied_version
+        if version != applied_version:
+            config, applied_version = effective_config(base_config, database_path)
             report_config = config.get("daily_reports", {}).get("frontend", {"enabled": True})
             bots_report_config = config.get("daily_reports", {}).get("bots", {"enabled": True})
             discard_removed(store, config)
-            log.info("monitoring list changed: removed_items=%s docker_containers=%s systemd_services=%s",
-                     len(applied_removals), len(config.get("docker", {}).get("containers") or []),
+            log.info("monitoring list changed: removed_items=%s added_projects=%s docker_containers=%s systemd_services=%s",
+                     len(applied_version[0]), len(applied_version[1]), len(config.get("docker", {}).get("containers") or []),
                      len(config.get("systemd", {}).get("services") or []))
+        # A container started that the monitor may not know: ask once about each new one.
+        if events.take_started():
+            for info in discover(database_path, base_config, announce=True):
+                notifier.send(*new_container_alert(info))
         active = []
         findings = host_checks(config.get("thresholds", {}), host_state)
         findings += docker_checks(config.get("docker", {}))

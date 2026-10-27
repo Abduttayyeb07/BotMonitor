@@ -885,6 +885,134 @@ class MonitoringRegressionTests(unittest.TestCase):
             self.assertIn('Zig Whale Bot', muted_text)
             self.assertEqual(len(muted_buttons), 2)
 
+    # --- Automatic discovery of new containers ---------------------------------------
+
+    @staticmethod
+    def running(name, compose=None, image='img', status='running', working_dir='/root/saad/x'):
+        labels = {'com.docker.compose.project': compose, 'com.docker.compose.project.working_dir': working_dir} if compose else {}
+        return SimpleNamespace(name=name, status=status, attrs={'Config': {'Labels': labels, 'Image': image}})
+
+    def discovery_base(self):
+        return {'docker': {'containers': [{'name': 'zig-whale-bot', 'project': 'marketzig'}]},
+                'projects': {'bots_docker': {'title': 'Bots (Docker)', 'items': [
+                    {'id': 'marketzig', 'name': 'Zig Whale Bot', 'containers': ['zig-whale-bot']}]},
+                    'frontend': {'title': 'Frontend', 'items': []}}}
+
+    def test_unknown_containers_are_grouped_by_compose_project(self):
+        from monitor.additions import unknown_groups
+        containers = {
+            'zig-whale-bot': self.running('zig-whale-bot', 'marketzig'),
+            'sol-usdt-monitor': self.running('sol-usdt-monitor', 'sol-usdt-bot', image='sol-usdt-bot-monitor'),
+            'sol-usdt-db': self.running('sol-usdt-db', 'sol-usdt-bot', image='postgres:16'),
+            'loose': self.running('loose'),
+            'stopped': self.running('stopped', 'old', status='exited'),
+            'central-monitor': self.running('central-monitor', 'botmonitor'),
+            'buildx_buildkit_builder0': self.running('buildx_buildkit_builder0'),
+        }
+        groups = unknown_groups(containers, {'zig-whale-bot'})
+        self.assertEqual(sorted(groups), ['compose:sol-usdt-bot', 'container:loose'])
+        sol = groups['compose:sol-usdt-bot']
+        self.assertEqual(sorted(sol['containers']), ['sol-usdt-db', 'sol-usdt-monitor'])
+        self.assertEqual(sol['details']['images'], ['sol-usdt-bot-monitor', 'postgres:16'])
+        self.assertEqual(sol['details']['working_dir'], '/root/saad/x')
+
+    def test_each_new_container_is_asked_about_only_once(self):
+        from monitor.additions import discovered, set_status, sync_discovered
+        base = self.discovery_base()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            # Already running at startup: recorded silently, no question.
+            self.assertEqual([info['name'] for info in sync_discovered(path, base, {'old': self.running('old', 'oldproj')}, announce=False)], ['oldproj'])
+            self.assertEqual(discovered(path)['compose:oldproj']['status'], 'seen')
+            containers = {'old': self.running('old', 'oldproj'), 'sol-usdt-monitor': self.running('sol-usdt-monitor', 'sol-usdt-bot')}
+            new = sync_discovered(path, base, containers, announce=True)
+            self.assertEqual([info['name'] for info in new], ['sol-usdt-bot'], 'only the new one is announced')
+            self.assertEqual(discovered(path)['compose:sol-usdt-bot']['status'], 'announced')
+            # Restarts / redeploys / compose up: never asked again, answered or not.
+            for _ in range(3):
+                self.assertEqual(sync_discovered(path, base, containers, announce=True), [])
+            set_status(path, new[0]['id'], 'ignored')
+            self.assertEqual(sync_discovered(path, base, containers, announce=True), [], 'ignored stays quiet')
+            self.assertEqual(discovered(path)['compose:sol-usdt-bot']['status'], 'ignored')
+
+    def test_added_project_joins_the_menu_and_checks_and_picks_up_new_containers(self):
+        from monitor.additions import config_version, discovered, effective_config, set_status, sync_discovered
+        from monitor.removals import project_key, remove_item
+        base = self.discovery_base()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            before = config_version(path)
+            info = sync_discovered(path, base, {'sol-usdt-monitor': self.running('sol-usdt-monitor', 'sol-usdt-bot')}, announce=True)[0]
+            set_status(path, info['id'], 'added', 'bots_docker')
+            self.assertNotEqual(config_version(path), before, 'the main loop sees the change')
+            config, _ = effective_config(base, path)
+            item = config['projects']['bots_docker']['items'][-1]
+            self.assertEqual((item['id'], item['name'], item['containers']), ('sol-usdt-bot', 'Sol Usdt Bot', ['sol-usdt-monitor']))
+            self.assertIn({'name': 'sol-usdt-monitor', 'project': 'sol-usdt-bot', 'critical': True}, config['docker']['containers'])
+            self.assertEqual(len(base['docker']['containers']), 1, 'config.yaml data is not modified')
+            # A new service in the same compose project is added automatically, without asking.
+            grown = {'sol-usdt-monitor': self.running('sol-usdt-monitor', 'sol-usdt-bot'), 'sol-usdt-db': self.running('sol-usdt-db', 'sol-usdt-bot')}
+            self.assertEqual(sync_discovered(path, base, grown, announce=True), [])
+            self.assertEqual(discovered(path)['compose:sol-usdt-bot']['containers'], ['sol-usdt-db', 'sol-usdt-monitor'])
+            # Removing an added bot from Telegram works like any other bot.
+            remove_item(path, project_key('bots_docker', 'sol-usdt-bot'), 'Sol Usdt Bot')
+            config, _ = effective_config(base, path)
+            self.assertNotIn('sol-usdt-bot', [i['id'] for i in config['projects']['bots_docker']['items']])
+            self.assertNotIn('sol-usdt-monitor', [c['name'] for c in config['docker']['containers']])
+            # A container that config.yaml lists but was removed in Telegram is not "new".
+            self.assertEqual(sync_discovered(path, base, {'zig-whale-bot': self.running('zig-whale-bot', 'marketzig')}, announce=True), [])
+
+    def test_new_container_alert_asks_once_with_three_buttons(self):
+        from monitor.service import new_container_alert
+        text, keyboard = new_container_alert({'id': 7, 'name': 'sol-usdt-bot', 'containers': ['sol-usdt-monitor'],
+                                              'details': {'images': ['sol<usdt>'], 'working_dir': '/root/saad/Sol-USDT-bot'}})
+        self.assertIn('🆕 <b>NEW CONTAINER DETECTED</b>', text)
+        self.assertIn('<code>sol&lt;usdt&gt;</code>', text)
+        self.assertIn('only be asked once', text)
+        self.assertEqual([button['callback_data'] for row in keyboard for button in row],
+                         ['disc:add:7:bots_docker', 'disc:add:7:frontend', 'disc:ign:7'])
+
+    def test_add_and_ignore_buttons_and_scan(self):
+        from monitor.additions import discovered, sync_discovered
+        base = self.discovery_base()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            containers = {'sol-usdt-monitor': self.running('sol-usdt-monitor', 'sol-usdt-bot'),
+                          'web': self.running('web', 'newsite'), 'junk': self.running('junk', 'junkproj')}
+            sync_discovered(path, base, containers, announce=False)
+            ids = {row['name']: row['id'] for row in discovered(path).values()}
+            panel = TelegramBotPanel('token', ['1'], base['projects'], database_path=path, base_config=base)
+            with patch('monitor.telegram_bot.inventory', return_value=containers):
+                text, keyboard = panel.scan_page()
+                self.assertIn('3 project(s)', text)
+                for name in ('Sol Usdt Bot', 'Newsite', 'Junkproj'):
+                    self.assertIn(name, text)
+                # Add from the "New container detected" message.
+                answer, buttons = panel.new_container_answer(f"add:{ids['sol-usdt-bot']}:bots_docker")
+                self.assertIn('added as a Bot', answer)
+                self.assertEqual(buttons[0][0]['callback_data'], 'project:bots_docker:sol-usdt-bot')
+                self.assertIn('sol-usdt-bot', [item['id'] for item in panel.projects['bots_docker']['items']], 'menu updated at once')
+                # Add as a frontend and ignore from /scan.
+                panel.discovery_action(f"add:{ids['newsite']}:frontend")
+                self.assertIn('newsite', [item['id'] for item in panel.projects['frontend']['items']])
+                answer, buttons = panel.new_container_answer(f"ign:{ids['junkproj']}")
+                self.assertIn('will not be asked about it again', answer)
+                text, keyboard = panel.scan_page()
+                self.assertIn('Every running container is monitored or ignored.', text)
+                self.assertEqual(keyboard, [[{'text': '🙈 Ignored (1)', 'callback_data': 'scan:ignored'}]])
+                text, keyboard = panel.scan_page(show_ignored=True)
+                self.assertIn('Junkproj', text)
+                self.assertEqual(keyboard[0][0]['callback_data'], f"scan:add:{ids['junkproj']}:bots_docker", 'ignored can still be added later')
+            self.assertEqual(panel.discovery_action('add:999:bots_docker')[0], '⚠️ That item no longer exists.')
+
+    def test_docker_events_report_started_containers_for_discovery(self):
+        import threading
+        from monitor.watchers import DockerEvents
+        events = DockerEvents(threading.Event())
+        events.handle({'Action': 'start', 'Actor': {'Attributes': {'name': 'sol-usdt-monitor'}}}, now=1)
+        self.assertEqual(events.take_started(), {'sol-usdt-monitor'})
+        self.assertEqual(events.take_started(), set())
+
     def test_small_disk_parts_show_in_kb_and_empty_ones_are_hidden(self):
         from monitor.telegram_bot import disk_split
         from monitor.view import memory_size

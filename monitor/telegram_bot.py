@@ -22,7 +22,8 @@ from .view import (MAX_MESSAGE, PKT, Page, card, code_box, grouped_card, log_lin
                    newest_lines_that_fit, split_html)
 from .docker_checks import inventory
 from .checks import read_systemd_snapshot
-from .removals import apply_removals, project_key, remove_item, removed_items, removed_keys, restore_item, service_key
+from .additions import discovered, display_name, effective_config, set_status, sync_discovered
+from .removals import project_key, remove_item, removed_items, restore_item, service_key
 from .reports import collect_bots_report, frontend_endpoint_results, frontend_report_items, frontend_report_message
 
 log = logging.getLogger(__name__)
@@ -89,13 +90,13 @@ class TelegramBotPanel:
         self.api_url = f"https://api.telegram.org/bot{token}" if token else ""
 
     def refresh(self) -> None:
-        """Re-read the removed-items list so menus and reports match what is monitored."""
+        """Re-read the added and removed lists so menus and reports match what is monitored."""
         if self.base_config is None:
             return
         try:
-            config = apply_removals(self.base_config, removed_keys(self.database_path))
+            config, _version = effective_config(self.base_config, self.database_path)
         except (sqlite3.Error, OSError):
-            log.exception("Could not read removed items")
+            log.exception("Could not read added/removed items")
             return
         self.projects = config.get("projects") or {}
         self.frontend_report_config = (config.get("daily_reports") or {}).get("frontend", {})
@@ -257,6 +258,7 @@ class TelegramBotPanel:
                 "/incidents — active incidents\n"
                 "/usage — top 10 projects by memory use\n"
                 "/muted — muted bots (unmute)\n"
+                "/scan — unmonitored containers (add / ignore)\n"
                 "/removed — items removed from monitoring (restore)\n"
                 "/frontendhealth — frontend health report\n"
                 "/botshealth — bot health report\n"
@@ -289,6 +291,7 @@ class TelegramBotPanel:
             {"command": "incidents", "description": "Show active incidents"},
             {"command": "usage", "description": "Top 10 projects by memory use"},
             {"command": "muted", "description": "Muted bots"},
+            {"command": "scan", "description": "Unmonitored containers (add / ignore)"},
             {"command": "removed", "description": "Restore removed items"},
             {"command": "frontendhealth", "description": "Show frontend health report"},
             {"command": "botshealth", "description": "Show bot health report"},
@@ -497,6 +500,84 @@ class TelegramBotPanel:
         if message_id:
             self.api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id,
                                                 "reply_markup": {"inline_keyboard": [[button]]}})
+
+    def added_project(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        """(group id, project) that an added discovery row became in the menu."""
+        for group_id, group in self.projects.items():
+            for item in group.get("items", []):
+                if row["containers"] and set(row["containers"]) & set(item.get("containers") or []):
+                    return group_id, item
+        return None
+
+    def discovery_action(self, data: str) -> tuple[str, dict[str, Any] | None]:
+        """'add:<id>:<group>' or 'ign:<id>'. Returns a short result line and the row."""
+        parts = data.split(":")
+        if len(parts) < 2 or not parts[1].isdigit():
+            return "⚠️ Unknown item.", None
+        row_id = int(parts[1])
+        if parts[0] == "add" and len(parts) == 3 and parts[2] in ("bots_docker", "frontend"):
+            row = set_status(self.database_path, row_id, "added", parts[2])
+            if row:
+                self.refresh()
+                kind = "Frontend" if parts[2] == "frontend" else "Bot"
+                log.warning("added to monitoring from Telegram: %s as %s", row["key"], kind)
+                return f"✅ <b>{esc(display_name(row['name']))}</b> added as a {kind}. It is in the menu and monitored now.", row
+        elif parts[0] == "ign":
+            row = set_status(self.database_path, row_id, "ignored")
+            if row:
+                return f"🙈 <b>{esc(display_name(row['name']))}</b> ignored. You will not be asked about it again.", row
+        return "⚠️ That item no longer exists.", None
+
+    def new_container_answer(self, data: str) -> tuple[str, list[list[dict[str, str]]]]:
+        """The 'New container detected' message after Add or Ignore was pressed."""
+        text, row = self.discovery_action(data)
+        buttons = []
+        if row and row["status"] == "added":
+            found = self.added_project(row)
+            if found:
+                buttons.append([{"text": f"📊 Open {found[1]['name'][:28]}", "callback_data": f"project:{found[0]}:{found[1]['id']}"}])
+        if row and row["status"] == "ignored":
+            buttons.append([{"text": "🔎 Unmonitored containers", "callback_data": "scan:list"}])
+        return text, buttons
+
+    def scan_page(self, notice: str = "", show_ignored: bool = False) -> tuple[str, list[list[dict[str, str]]]]:
+        """Running containers nobody added yet (or the ignored ones), each with Add / Ignore buttons."""
+        if self.base_config is not None:
+            try:
+                sync_discovered(self.database_path, self.base_config, inventory(), announce=False)
+            except Exception:
+                log.exception("container scan failed")
+        try:
+            rows = discovered(self.database_path)
+        except (sqlite3.Error, OSError):
+            rows = {}
+        wanted = ("ignored",) if show_ignored else ("seen", "announced")
+        items = [row for row in rows.values() if row["status"] in wanted]
+        ignored = sum(1 for row in rows.values() if row["status"] == "ignored")
+        page = Page("🔎", "Ignored containers" if show_ignored else "Unmonitored containers",
+                    f"{len(items)} project(s)" if items else None)
+        if notice:
+            page.add(notice)
+        if not items:
+            page.add("<i>Nothing here.</i>" if show_ignored else "<i>Every running container is monitored or ignored.</i>")
+        shown = items[:25]  # Telegram allows 100 buttons per message
+        for row in shown:
+            page.add(card(f"📦 {esc(display_name(row['name']))}", [
+                ("Containers", ", ".join(row["containers"])), ("Image", ", ".join(row["details"].get("images") or []) or None),
+                ("Folder", row["details"].get("working_dir"), "code")]))
+        if len(items) > len(shown):
+            page.add(f"<i>…and {len(items) - len(shown)} more. Add or ignore some to see the rest.</i>")
+        buttons = []
+        for row in shown:
+            label = display_name(row["name"])[:18]
+            buttons.append([{"text": f"➕ {label}", "callback_data": f"scan:add:{row['id']}:bots_docker"},
+                            {"text": "🌐 Frontend", "callback_data": f"scan:add:{row['id']}:frontend"}]
+                           + ([] if show_ignored else [{"text": "🙈", "callback_data": f"scan:ign:{row['id']}"}]))
+        if show_ignored:
+            buttons.append([{"text": "⬅️ Unmonitored", "callback_data": "scan:list"}])
+        elif ignored:
+            buttons.append([{"text": f"🙈 Ignored ({ignored})", "callback_data": "scan:ignored"}])
+        return page.html(), buttons
 
     def bot_info_page(self, group_id: str, project_id: str) -> tuple[str, list[list[dict[str, str]]]]:
         """What is specific to this bot (exchanges, slots, RPC heights, ...) or frontend (health endpoint)."""
@@ -774,6 +855,9 @@ class TelegramBotPanel:
                     self.edit(chat_id, waiting, self.usage_text())
                 else:
                     self.send(chat_id, self.usage_text())
+            elif command == "/scan":
+                text, keyboard = self.scan_page()
+                self.send(chat_id, text, keyboard)
             elif command == "/muted":
                 text, keyboard = self.muted_page()
                 self.send(chat_id, text, keyboard)
@@ -810,6 +894,14 @@ class TelegramBotPanel:
         elif data.startswith("container:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.container_page(group_id, project_id, int(index))
+        elif data.startswith("disc:"):
+            # Add / Ignore under a 'New container detected' message.
+            text, keyboard = self.new_container_answer(data.split(":", 1)[1])
+        elif data in ("scan:list", "scan:ignored"):
+            text, keyboard = self.scan_page(show_ignored=data == "scan:ignored")
+        elif data.startswith(("scan:add:", "scan:ign:")):
+            result, _row = self.discovery_action(data.split(":", 1)[1])
+            text, keyboard = self.scan_page(notice=result)
         elif data.startswith("svcinfo:"):
             _, group_id, project_id, index = data.split(":", 3)
             text, keyboard = self.service_info_page(group_id, project_id, int(index))
