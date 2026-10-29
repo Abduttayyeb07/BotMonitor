@@ -146,10 +146,12 @@ def apply_additions(config: dict[str, Any], rows: dict[str, dict[str, Any]]) -> 
 def effective_config(base_config: dict[str, Any], database_path: str) -> tuple[dict[str, Any], tuple]:
     """config.yaml + containers added from Telegram - items removed from Telegram, and a
     version stamp that changes whenever either list changes."""
+    from .bot_details import align_report_containers
     from .removals import apply_removals, removed_keys
     rows = discovered(database_path)
     keys = removed_keys(database_path)
-    return apply_removals(apply_additions(base_config, rows), keys), (keys, signature(rows))
+    config = align_report_containers(apply_removals(apply_additions(base_config, rows), keys))
+    return config, (keys, signature(rows))
 
 
 def config_version(database_path: str) -> tuple:

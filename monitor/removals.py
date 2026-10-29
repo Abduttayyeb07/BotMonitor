@@ -141,11 +141,16 @@ def apply_removals(config: dict[str, Any], keys: frozenset[str] | set[str]) -> d
             frontend_report["enabled"] = False
 
     bot_reports = result.setdefault("bot_reports", {})
+    # A check stays on while another bot in the menu still uses it (e.g. an old entry was
+    # removed after the same bot was re-added under a new container name).
+    remaining_ids = {item.get("id") for group in projects.values() for item in group.get("items", [])}
+    still_used = {BOT_REPORT_KEYS[project_id] for project_id in remaining_ids if project_id in BOT_REPORT_KEYS}
     for project_id in project_ids:
-        if project_id in BOT_REPORT_KEYS:
-            bot_reports.setdefault(BOT_REPORT_KEYS[project_id], {})["enabled"] = False
-    for section in bot_reports.values():
-        if isinstance(section, dict) and section.get("container") in containers:
+        key = BOT_REPORT_KEYS.get(project_id)
+        if key and key not in still_used:
+            bot_reports.setdefault(key, {})["enabled"] = False
+    for key, section in bot_reports.items():
+        if isinstance(section, dict) and section.get("container") in containers and key not in still_used:
             section["enabled"] = False
     if units:
         system_services = bot_reports.setdefault("system_services", {})

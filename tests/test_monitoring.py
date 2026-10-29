@@ -999,6 +999,44 @@ class MonitoringRegressionTests(unittest.TestCase):
             # A container that config.yaml lists but was removed in Telegram is not "new".
             self.assertEqual(sync_discovered(path, base, {'zig-whale-bot': self.running('zig-whale-bot', 'marketzig')}, announce=True), [])
 
+    def test_report_follows_a_bot_re_added_under_a_new_container_name(self):
+        from monitor.additions import effective_config, set_status, sync_discovered
+        from monitor.removals import project_key, remove_item
+        old, new = 'zig-usd-only-alerts-zig-only-alerts-1', 'zig-only-alerts-zig-only-alerts-1'
+        base = {'docker': {'containers': [{'name': old, 'project': 'zig-usd-only-alerts'}]},
+                'projects': {'bots_docker': {'items': [{'id': 'zig-usd-only-alerts', 'name': 'Zig USD Alerts', 'containers': [old]}]}},
+                'bot_reports': {'zig_usd_alerts': {'container': old, 'marker': '[PROCESSING] TX:'}}}
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / 'incidents.db')
+            config, _ = effective_config(base, path)
+            self.assertEqual(config['bot_reports']['zig_usd_alerts']['container'], old, 'unchanged until a new bot appears')
+            # The renamed bot is added from Telegram (/scan or the New container message).
+            info = sync_discovered(path, base, {new: self.running(new, 'zig-only-alerts')}, announce=True)[0]
+            set_status(path, info['id'], 'added', 'bots_docker')
+            config, _ = effective_config(base, path)
+            self.assertEqual(config['bot_reports']['zig_usd_alerts']['container'], new, 'the report follows the added bot')
+            self.assertEqual(config['bot_reports']['zig_usd_alerts']['marker'], '[PROCESSING] TX:', 'other settings kept')
+            self.assertEqual(base['bot_reports']['zig_usd_alerts']['container'], old, 'config.yaml data is not modified')
+            # Removing the old entry keeps the check on, because the new bot still uses it.
+            remove_item(path, project_key('bots_docker', 'zig-usd-only-alerts'), 'Zig USD Alerts')
+            config, _ = effective_config(base, path)
+            section = config['bot_reports']['zig_usd_alerts']
+            self.assertNotEqual(section.get('enabled'), False)
+            self.assertEqual(section['container'], new)
+            # Removing the new one too: nothing uses the check any more, so it goes from the report.
+            remove_item(path, project_key('bots_docker', 'zig-only-alerts'), 'Zig Only Alerts')
+            config, _ = effective_config(base, path)
+            self.assertIs(config['bot_reports']['zig_usd_alerts']['enabled'], False)
+
+    def test_report_follows_a_config_entry_whose_container_was_renamed(self):
+        from monitor.bot_details import align_report_containers
+        config = {'projects': {'bots_docker': {'items': [{'id': 'zig-only-alerts', 'name': 'Zig Alerts',
+                                                           'containers': ['zig-only-alerts-zig-only-alerts-1']}]}},
+                  'bot_reports': {'zig_usd_alerts': {'container': 'zig-usd-only-alerts-zig-only-alerts-1'}}}
+        aligned = align_report_containers(config)
+        self.assertEqual(aligned['bot_reports']['zig_usd_alerts']['container'], 'zig-only-alerts-zig-only-alerts-1')
+        self.assertIs(align_report_containers(aligned), aligned, 'nothing to change -> same object, no copy')
+
     def test_new_container_alert_asks_once_with_three_buttons(self):
         from monitor.service import new_container_alert
         text, keyboard = new_container_alert({'id': 7, 'name': 'sol-usdt-bot', 'containers': ['sol-usdt-monitor'],

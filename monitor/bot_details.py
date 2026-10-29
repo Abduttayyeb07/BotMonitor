@@ -6,6 +6,7 @@ changed, and a check that fails shows as "unavailable" instead of breaking the p
 """
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from typing import Any, Callable
@@ -134,6 +135,42 @@ PROJECT_CHECKS = {
     "patronicluster": "zigchain_bot", "stakeunstake": "stake_unstake", "wallet-monitor": "wallet_monitor",
     "launches": "mdf_tracker", "highlaunches": "highbuy_monitor",
 }
+
+
+def align_report_containers(config: dict[str, Any]) -> dict[str, Any]:
+    """Point each bot check at the container its menu entry actually runs.
+
+    config.yaml names a container for every check (bot_reports.<key>.container). When a
+    bot is renamed and re-added (from Telegram or config) under a new container name,
+    the check would keep looking for the old one. Here each check follows the menu
+    entry that belongs to it (by project id, else by container), preferring one added
+    from Telegram over an old config.yaml entry. Returns a copy when anything changes.
+    """
+    bot_reports = config.get("bot_reports") or {}
+    owners: dict[str, dict[str, Any]] = {}
+    for group_id, group in (config.get("projects") or {}).items():
+        if group_id == "frontend":
+            continue
+        for item in group.get("items", []):
+            containers = item.get("containers") or []
+            if not containers:
+                continue
+            key = PROJECT_CHECKS.get(item.get("id", "")) or next(
+                (candidate for candidate, settings in bot_reports.items()
+                 if candidate in CHECKS and isinstance(settings, dict) and settings.get("container") in containers), None)
+            if not key:
+                continue
+            current = owners.get(key)
+            if current is None or (item.get("added_from_telegram") and not current.get("added_from_telegram")):
+                owners[key] = item
+    changes = {key: item["containers"][0] for key, item in owners.items()
+               if (bot_reports.get(key) or {}).get("container") not in item["containers"]}
+    if not changes:
+        return config
+    result = copy.deepcopy(config)
+    for key, container in changes.items():
+        result.setdefault("bot_reports", {}).setdefault(key, {})["container"] = container
+    return result
 
 
 def check_key(project: dict[str, Any], bot_reports: dict[str, Any]) -> str | None:
