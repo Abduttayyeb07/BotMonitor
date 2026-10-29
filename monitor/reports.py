@@ -968,6 +968,15 @@ def system_service_results(config: dict[str, Any] | None = None) -> dict[str, An
             "services": rows, "error": "; ".join(row["error"] for row in rows if row["error"])}
 
 
+def check_failure(exc: Exception) -> str:
+    """Why a check could not run, in words. A missing container usually means it was renamed."""
+    if isinstance(exc, docker.errors.NotFound):
+        missing = re.search(r"No such container: (\S+)", str(getattr(exc, "explanation", "") or exc))
+        name = missing.group(1) if missing else "the configured container"
+        return f"Container not found: {name}. Renamed or removed? Update its name in config.yaml."[:300]
+    return f"Check unavailable: {type(exc).__name__}: {exc}"[:300]
+
+
 def collect_bots_report(config: dict[str, Any] | None = None) -> str:
     """Keep one unavailable bot from hiding the rest of the daily report."""
     config = config or {}
@@ -977,7 +986,7 @@ def collect_bots_report(config: dict[str, Any] | None = None) -> str:
             return function(*args)
         except Exception as exc:
             log.warning("bots report check failed: %s (%s: %s)", name, type(exc).__name__, exc)
-            return {"name": name, "ok": False, "error": f"Check unavailable: {type(exc).__name__}: {exc}"[:300]}
+            return {"name": name, "ok": False, "error": check_failure(exc)}
 
     # Sections removed from monitoring carry enabled=False and are left out entirely.
     specs = {

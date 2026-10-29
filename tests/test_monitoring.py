@@ -581,6 +581,25 @@ class MonitoringRegressionTests(unittest.TestCase):
             text = bot_details({'id': 'marketzig', 'containers': []}, {})
         self.assertEqual(text, '<blockquote><b>🩺 Bot Health</b>\n├ Status: ⚪ Check unavailable\n└ Reason: RuntimeError: docker down</blockquote>')
 
+    def test_a_renamed_or_removed_container_is_explained_in_words(self):
+        import docker
+        from monitor.reports import check_failure, collect_bots_report
+        from monitor.bot_details import bot_details
+        missing = docker.errors.NotFound('404 Client Error: Not Found',
+                                         explanation='No such container: zig-usd-only-alerts-zig-only-alerts-1')
+        self.assertEqual(check_failure(missing), 'Container not found: zig-usd-only-alerts-zig-only-alerts-1. '
+                                                 'Renamed or removed? Update its name in config.yaml.')
+        self.assertEqual(check_failure(RuntimeError('boom')), 'Check unavailable: RuntimeError: boom')
+        with patch('monitor.reports._container_logs', side_effect=missing):
+            report = collect_bots_report({key: {'enabled': False} for key in (
+                'zig_whale', 'wallet_monitor', 'zigchain_bot', 'stake_unstake', 'mdf_tracker', 'highbuy_monitor',
+                'nawa_valdora', 'nawa_finance_redeemer', 'tokenx_vault', 'bep20_usdt', 'eth_usdt', 'sheets_sync',
+                'system_services', 'sol_usdt')})
+        self.assertIn('Container not found: zig-usd-only-alerts-zig-only-alerts-1', report)
+        with patch('monitor.bot_details.CHECKS', {'zig_usd_alerts': (Mock(side_effect=missing), Mock())}):
+            card_text = bot_details({'id': 'zig-only-alerts', 'containers': []}, {})
+        self.assertIn('└ Reason: Container not found: zig-usd-only-alerts-zig-only-alerts-1.', card_text)
+
     def test_frontend_bot_info_shows_its_health_endpoint(self):
         from monitor.bot_details import frontend_details
         result = [{'name': 'Arkive', 'url': 'http://127.0.0.1:8043/health', 'ok': True, 'status_code': 200, 'response_ms': 34, 'error': ''}]

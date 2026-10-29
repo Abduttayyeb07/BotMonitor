@@ -10,7 +10,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from .reports import (DEFAULT_BEP20_CONTAINER, DEFAULT_ETH_USDT_CONTAINER, frontend_endpoint_results,
+from .reports import (DEFAULT_BEP20_CONTAINER, DEFAULT_ETH_USDT_CONTAINER, check_failure, frontend_endpoint_results,
                       frontend_report_items, highbuy_monitor_results, mdf_tracker_results,
                       nawa_finance_redeemer_results, nawa_valdora_results, sheets_sync_results, sol_usdt_results,
                       stake_unstake_results, system_service_results, tokenx_vault_results, usdt_backfill_results,
@@ -150,7 +150,8 @@ def check_key(project: dict[str, Any], bot_reports: dict[str, Any]) -> str | Non
 
 
 def unavailable(heading: str, exc: Exception) -> str:
-    return card(heading, [("Status", "⚪ Check unavailable"), ("Reason", f"{type(exc).__name__}: {exc}"[:200])])
+    reason = check_failure(exc).removeprefix("Check unavailable: ")  # the Status line already says so
+    return card(heading, [("Status", "⚪ Check unavailable"), ("Reason", reason[:200])])
 
 
 def bot_details(project: dict[str, Any], bot_reports: dict[str, Any]) -> str | None:
